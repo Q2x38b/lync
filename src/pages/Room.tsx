@@ -832,7 +832,7 @@ function VideoTile({ tile, className = '', compact = false }: VideoTileProps) {
           autoPlay
           playsInline
           muted={tile.isLocal}
-          className={`w-full h-full object-cover ${shouldMirror ? 'scale-x-[-1]' : ''}`}
+          className={`w-full h-full object-contain ${shouldMirror ? 'scale-x-[-1]' : ''}`}
         />
       ) : (
         <div className="absolute inset-0 flex items-center justify-center bg-muted">
