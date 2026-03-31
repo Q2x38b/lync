@@ -106,8 +106,42 @@ export function Room() {
   const [showLeaveModal, setShowLeaveModal] = useState(false)
   const [hasSeenRoom, setHasSeenRoom] = useState(false)
 
-  const userName = localStorage.getItem('userName') || 'Anonymous'
+  // Join prompt state for direct URL navigation
+  const [showJoinPrompt, setShowJoinPrompt] = useState(false)
+  const [joinName, setJoinName] = useState('')
+  const [hasJoined, setHasJoined] = useState(false)
+
+  // Check if user needs to enter their name
+  const storedUserName = localStorage.getItem('userName')
+  const [userName, setUserName] = useState(storedUserName || '')
   const chatEndRef = useRef<HTMLDivElement>(null)
+
+  // Show join prompt if no username is stored
+  useEffect(() => {
+    if (!storedUserName && !hasJoined) {
+      setShowJoinPrompt(true)
+    } else if (storedUserName) {
+      setUserName(storedUserName)
+      setHasJoined(true)
+    }
+  }, [storedUserName, hasJoined])
+
+  // Handle join submission
+  const handleJoinSubmit = () => {
+    if (joinName.trim()) {
+      localStorage.setItem('userName', joinName.trim())
+      setUserName(joinName.trim())
+      setShowJoinPrompt(false)
+      setHasJoined(true)
+    }
+  }
+
+  // Save current room code to localStorage for reconnection
+  useEffect(() => {
+    if (code && hasJoined) {
+      localStorage.setItem('lastRoomCode', code)
+    }
+  }, [code, hasJoined])
 
   const room = useQuery(
     api.rooms.getRoomByCode,
@@ -134,7 +168,7 @@ export function Room() {
     toggleVideo,
     toggleScreenShare,
     participants,
-  } = useWebRTC(room?._id ?? null, userName)
+  } = useWebRTC(hasJoined && room?._id ? room._id : null, userName)
 
   // Show active favicon when in a call
   useFavicon(!!room && !!localStream)
@@ -293,12 +327,16 @@ export function Room() {
     if (isHost) {
       setShowLeaveModal(true)
     } else {
+      // Clear the last room code since we're intentionally leaving
+      localStorage.removeItem('lastRoomCode')
       leaveRoom({ peerId }).then(() => navigate('/'))
     }
   }
 
   const handleLeaveConfirm = async (deleteRoomFlag: boolean) => {
     setShowLeaveModal(false)
+    // Clear the last room code since we're intentionally leaving
+    localStorage.removeItem('lastRoomCode')
     if (deleteRoomFlag && room) {
       await deleteRoom({ roomId: room._id })
     } else {
@@ -332,9 +370,55 @@ export function Room() {
     )
   }
 
+  // Show join prompt if user needs to enter their name
+  if (showJoinPrompt) {
+    return (
+      <div className="h-screen w-full bg-background flex items-center justify-center p-4">
+        <div className="w-full max-w-md">
+          <div className="text-center mb-8">
+            <h1 className="text-2xl font-medium mb-2">Join Room</h1>
+            <p className="text-muted-foreground text-sm">
+              Joining: <span className="font-mono">{room.name}</span>
+            </p>
+            <p className="text-muted-foreground text-xs mt-1">
+              Room Code: {code}
+            </p>
+          </div>
+
+          <div className="space-y-4">
+            <input
+              type="text"
+              placeholder="Enter your name"
+              value={joinName}
+              onChange={(e) => setJoinName(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && handleJoinSubmit()}
+              className="w-full px-4 py-3 bg-secondary rounded-lg outline-none focus:ring-2 ring-ring placeholder:text-muted-foreground"
+              autoFocus
+            />
+
+            <button
+              onClick={handleJoinSubmit}
+              disabled={!joinName.trim()}
+              className="w-full py-3 bg-foreground text-background rounded-full font-medium hover:opacity-90 transition-opacity disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              Join Room
+            </button>
+
+            <button
+              onClick={() => navigate('/')}
+              className="w-full py-2 text-muted-foreground text-sm hover:text-foreground transition-colors"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
   // Build video tiles array
   const tiles = [
-    { id: 'local', stream: localStream, name: userName, isLocal: true, isMuted, isVideoOff, isScreenSharing },
+    { id: 'local', stream: localStream, name: userName || 'You', isLocal: true, isMuted, isVideoOff, isScreenSharing },
     ...Array.from(peers.values()).map((p) => ({
       id: p.peerId,
       stream: p.stream || null,
@@ -872,7 +956,7 @@ function VideoTile({ tile, className = '', compact = false }: VideoTileProps) {
 
   // Show video if we have a stream with video tracks
   const hasVideoTrack = tile.stream && tile.stream.getVideoTracks().length > 0
-  const showVideo = hasVideoTrack && !tile.isVideoOff
+  const showVideo = hasVideoTrack && !tile.isVideoOff && !hasError
 
   return (
     <div className={`relative bg-secondary rounded-xl overflow-hidden ${className}`}>

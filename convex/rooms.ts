@@ -2,12 +2,15 @@ import { mutation, query } from "./_generated/server";
 import { v } from "convex/values";
 
 function generateRoomCode(): string {
+  // Generate a longer, more complex room code (12 characters)
+  // Format: XXXX-XXXX-XXXX for readability
   const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
   let code = "";
-  for (let i = 0; i < 6; i++) {
+  for (let i = 0; i < 12; i++) {
     code += chars[Math.floor(Math.random() * chars.length)];
   }
-  return code;
+  // Insert dashes for readability: XXXX-XXXX-XXXX
+  return `${code.slice(0, 4)}-${code.slice(4, 8)}-${code.slice(8, 12)}`;
 }
 
 export const createRoom = mutation({

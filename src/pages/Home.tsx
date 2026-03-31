@@ -52,9 +52,11 @@ export function Home() {
   const [error, setError] = useState('')
 
   const createRoom = useMutation(api.rooms.createRoom)
+  // Room code format: XXXX-XXXX-XXXX (14 chars with dashes)
+  const isValidRoomCode = roomCode.length === 14 && /^[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}$/.test(roomCode)
   const roomByCode = useQuery(
     api.rooms.getRoomByCode,
-    mode === 'join' && roomCode.length === 6 ? { code: roomCode.toUpperCase() } : 'skip'
+    mode === 'join' && isValidRoomCode ? { code: roomCode.toUpperCase() } : 'skip'
   )
 
   useEffect(() => {
@@ -98,7 +100,7 @@ export function Home() {
 
   const verifyPassword = useQuery(
     api.rooms.verifyRoomPassword,
-    mode === 'join' && roomCode.length === 6 && roomByCode?.hasPassword && joinPassword
+    mode === 'join' && isValidRoomCode && roomByCode?.hasPassword && joinPassword
       ? { code: roomCode.toUpperCase(), password: joinPassword }
       : 'skip'
   )
@@ -109,8 +111,8 @@ export function Home() {
       return
     }
 
-    if (roomCode.length !== 6) {
-      setError('Room code must be 6 characters')
+    if (!isValidRoomCode) {
+      setError('Room code must be in format XXXX-XXXX-XXXX')
       return
     }
 
@@ -383,9 +385,22 @@ export function Home() {
                 <Hash size={18} className="absolute left-4 top-1/2 -translate-y-1/2 text-muted-foreground" />
                 <input
                   type="text"
-                  placeholder="Room code"
+                  placeholder="XXXX-XXXX-XXXX"
                   value={roomCode}
-                  onChange={(e) => setRoomCode(e.target.value.toUpperCase().slice(0, 6))}
+                  onChange={(e) => {
+                    // Remove non-alphanumeric characters and convert to uppercase
+                    let value = e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, '')
+                    // Limit to 12 characters (without dashes)
+                    value = value.slice(0, 12)
+                    // Add dashes: XXXX-XXXX-XXXX
+                    if (value.length > 4) {
+                      value = value.slice(0, 4) + '-' + value.slice(4)
+                    }
+                    if (value.length > 9) {
+                      value = value.slice(0, 9) + '-' + value.slice(9)
+                    }
+                    setRoomCode(value)
+                  }}
                   className="w-full pl-10 pr-4 py-3 bg-secondary rounded-lg outline-none focus:ring-2 ring-ring placeholder:text-muted-foreground uppercase tracking-widest"
                 />
               </div>
@@ -425,7 +440,7 @@ export function Home() {
                 </div>
               </div>
 
-              {roomCode.length === 6 && roomByCode && (
+              {isValidRoomCode && roomByCode && (
                 <div className="space-y-3">
                   <div className="p-3 bg-secondary rounded-lg flex items-center gap-2">
                     <div className="w-2 h-2 bg-green-400 rounded-full" />
@@ -461,7 +476,7 @@ export function Home() {
                 </div>
               )}
 
-              {roomCode.length === 6 && roomByCode === null && (
+              {isValidRoomCode && roomByCode === null && (
                 <p className="text-red-400 text-sm">Room not found</p>
               )}
             </div>
