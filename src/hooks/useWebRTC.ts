@@ -46,6 +46,12 @@ const ICE_SERVERS: RTCIceServer[] = [
 // Client-side signal TTL (30 seconds) - signals older than this are ignored
 const SIGNAL_TTL_MS = 30 * 1000
 
+// Debug logging helper
+const DEBUG = true
+const log = (...args: unknown[]) => {
+  if (DEBUG) console.log('[WebRTC]', ...args)
+}
+
 export function useWebRTC(roomId: Id<"rooms"> | null, userName: string) {
   const [localStream, setLocalStream] = useState<MediaStream | null>(null)
   const [screenStream, setScreenStream] = useState<MediaStream | null>(null)
@@ -67,6 +73,7 @@ export function useWebRTC(roomId: Id<"rooms"> | null, userName: string) {
   const iceBatchRef = useRef<Map<string, RTCIceCandidateInit[]>>(new Map())
   const iceBatchTimerRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
   const makingOfferRef = useRef<Map<string, boolean>>(new Map())
+  const currentRoomIdRef = useRef<Id<"rooms"> | null>(null)
 
   const joinRoom = useMutation(api.rooms.joinRoom)
   const leaveRoom = useMutation(api.rooms.leaveRoom)
@@ -81,9 +88,10 @@ export function useWebRTC(roomId: Id<"rooms"> | null, userName: string) {
     roomId ? { roomId } : 'skip'
   )
 
+  // Only query signals when we have a valid roomId and are ready
   const signals = useQuery(
     api.signals.getSignals,
-    { peerId }
+    roomId && isReady ? { peerId } : 'skip'
   )
 
   const syncPeers = useCallback(() => {
@@ -94,6 +102,7 @@ export function useWebRTC(roomId: Id<"rooms"> | null, userName: string) {
 
   // Initialize local media
   const initStream = useCallback(async () => {
+    log('Initializing local media stream')
     const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent)
 
     // Read user preferences from localStorage
@@ -142,12 +151,13 @@ export function useWebRTC(roomId: Id<"rooms"> | null, userName: string) {
         stream.getTracks().forEach(t => t.stop())
         return null
       }
+      log('Got local stream with tracks:', stream.getTracks().map(t => `${t.kind}:${t.enabled}`))
       setLocalStream(stream)
       localStreamRef.current = stream
       applyPreferences(stream)
       return stream
-    } catch {
-      // Video+audio failed, try fallbacks
+    } catch (err) {
+      log('Video+audio failed:', err)
     }
 
     // Try video only
@@ -157,6 +167,7 @@ export function useWebRTC(roomId: Id<"rooms"> | null, userName: string) {
         stream.getTracks().forEach(t => t.stop())
         return null
       }
+      log('Got video-only stream')
       setLocalStream(stream)
       localStreamRef.current = stream
       setIsMuted(true)
@@ -168,8 +179,8 @@ export function useWebRTC(roomId: Id<"rooms"> | null, userName: string) {
         }
       }
       return stream
-    } catch {
-      // Video-only failed
+    } catch (err) {
+      log('Video-only failed:', err)
     }
 
     // Try audio only
@@ -179,6 +190,7 @@ export function useWebRTC(roomId: Id<"rooms"> | null, userName: string) {
         stream.getTracks().forEach(t => t.stop())
         return null
       }
+      log('Got audio-only stream')
       setLocalStream(stream)
       localStreamRef.current = stream
       setIsVideoOff(true)
@@ -190,10 +202,11 @@ export function useWebRTC(roomId: Id<"rooms"> | null, userName: string) {
         }
       }
       return stream
-    } catch {
-      // Audio-only failed
+    } catch (err) {
+      log('Audio-only failed:', err)
     }
 
+    log('No media available')
     return null
   }, [])
 
@@ -201,21 +214,32 @@ export function useWebRTC(roomId: Id<"rooms"> | null, userName: string) {
   const createPeerConnection = useCallback((targetId: string, targetName: string, isInitiator: boolean) => {
     if (!roomId) return null
     if (peersRef.current.has(targetId)) {
+      log('Peer connection already exists for', targetId)
       return peersRef.current.get(targetId)!.pc
     }
 
+    log('Creating peer connection to', targetId, 'isInitiator:', isInitiator)
     const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS })
 
-    // Add local tracks
+    // Add local tracks BEFORE storing the connection
     if (localStreamRef.current) {
-      localStreamRef.current.getTracks().forEach(track => {
+      const tracks = localStreamRef.current.getTracks()
+      log('Adding', tracks.length, 'local tracks to peer connection')
+      tracks.forEach(track => {
         pc.addTrack(track, localStreamRef.current!)
       })
+    } else {
+      log('Warning: No local stream available when creating peer connection')
     }
+
+    // Store connection BEFORE setting up event handlers
+    // This ensures the connection exists when events fire
+    const connection: PeerConnection = { peerId: targetId, pc, name: targetName }
+    peersRef.current.set(targetId, connection)
 
     // Handle ICE candidates - batch them to reduce signal count
     pc.onicecandidate = (event) => {
-      if (event.candidate && mountedRef.current) {
+      if (event.candidate && mountedRef.current && currentRoomIdRef.current) {
         // Add to batch
         const batch = iceBatchRef.current.get(targetId) || []
         batch.push(event.candidate.toJSON())
@@ -228,13 +252,14 @@ export function useWebRTC(roomId: Id<"rooms"> | null, userName: string) {
         // Set new timer to send batch after 100ms
         const timer = setTimeout(() => {
           const candidates = iceBatchRef.current.get(targetId) || []
-          if (candidates.length > 0 && mountedRef.current) {
+          if (candidates.length > 0 && mountedRef.current && currentRoomIdRef.current) {
+            log('Sending', candidates.length, 'ICE candidates to', targetId)
             sendSignal({
-              roomId,
+              roomId: currentRoomIdRef.current,
               from: peerId,
               to: targetId,
               signal: JSON.stringify({ type: 'candidates', candidates }),
-            }).catch(() => {})
+            }).catch(err => log('Failed to send candidates:', err))
             iceBatchRef.current.delete(targetId)
           }
           iceBatchTimerRef.current.delete(targetId)
@@ -245,87 +270,117 @@ export function useWebRTC(roomId: Id<"rooms"> | null, userName: string) {
 
     pc.oniceconnectionstatechange = () => {
       const state = pc.iceConnectionState
+      log('ICE connection state changed to', state, 'for', targetId)
       if (state === 'failed') {
-        // Try to restart ICE
+        log('ICE connection failed, restarting ICE')
         pc.restartIce()
+      } else if (state === 'connected' || state === 'completed') {
+        log('ICE connection established with', targetId)
       }
+    }
+
+    pc.onconnectionstatechange = () => {
+      log('Connection state changed to', pc.connectionState, 'for', targetId)
     }
 
     // Handle remote tracks
     pc.ontrack = (event) => {
+      log('Received track from', targetId, '- kind:', event.track.kind, 'enabled:', event.track.enabled)
+
       const conn = peersRef.current.get(targetId)
-      if (conn) {
-        // Use the stream from the event if available
-        let remoteStream: MediaStream
+      if (!conn) {
+        log('Warning: No connection found for', targetId, 'when receiving track')
+        return
+      }
 
-        if (event.streams[0]) {
-          remoteStream = event.streams[0]
-        } else if (conn.stream) {
-          // Add track to existing stream if we already have one
-          conn.stream.addTrack(event.track)
-          remoteStream = conn.stream
-        } else {
-          // Create new stream with this track
-          remoteStream = new MediaStream([event.track])
-        }
+      // Use the stream from the event if available
+      let remoteStream: MediaStream
 
-        // Update the connection with the stream reference
-        const updatedConn = { ...conn, stream: remoteStream }
-        peersRef.current.set(targetId, updatedConn)
+      if (event.streams && event.streams[0]) {
+        remoteStream = event.streams[0]
+        log('Using stream from event, tracks:', remoteStream.getTracks().map(t => t.kind))
+      } else if (conn.stream) {
+        // Add track to existing stream if we already have one
+        log('Adding track to existing stream')
+        conn.stream.addTrack(event.track)
+        remoteStream = conn.stream
+      } else {
+        // Create new stream with this track
+        log('Creating new stream for track')
+        remoteStream = new MediaStream([event.track])
+      }
 
-        // Force React to see the change by creating a new Map
-        if (mountedRef.current) {
-          setPeers(new Map(peersRef.current))
-        }
+      // Update the connection with the stream reference
+      const updatedConn = { ...conn, stream: remoteStream }
+      peersRef.current.set(targetId, updatedConn)
+
+      // Force React to see the change by creating a new Map
+      if (mountedRef.current) {
+        log('Updating peers state with new stream')
+        setPeers(new Map(peersRef.current))
       }
     }
 
     // Handle negotiation needed (for renegotiation)
     pc.onnegotiationneeded = async () => {
-      if (makingOfferRef.current.get(targetId)) return
+      // Only the initiator should send offers during renegotiation
+      const shouldInitiate = peerId > targetId
+      if (!shouldInitiate) {
+        log('Skipping negotiation - not the initiator for', targetId)
+        return
+      }
+
+      if (makingOfferRef.current.get(targetId)) {
+        log('Already making offer to', targetId)
+        return
+      }
 
       try {
         makingOfferRef.current.set(targetId, true)
+        log('Creating offer for', targetId, 'due to negotiation needed')
         const offer = await pc.createOffer()
-        if (pc.signalingState !== 'stable') return
+        if (pc.signalingState !== 'stable') {
+          log('Signaling state not stable, aborting offer')
+          return
+        }
         await pc.setLocalDescription(offer)
 
-        if (pc.localDescription && mountedRef.current) {
+        if (pc.localDescription && mountedRef.current && currentRoomIdRef.current) {
+          log('Sending offer to', targetId)
           sendSignal({
-            roomId,
+            roomId: currentRoomIdRef.current,
             from: peerId,
             to: targetId,
             signal: JSON.stringify({ type: 'offer', sdp: pc.localDescription }),
-          }).catch(() => {})
+          }).catch(err => log('Failed to send offer:', err))
         }
-      } catch {
-        // Negotiation error
+      } catch (err) {
+        log('Negotiation error:', err)
       } finally {
         makingOfferRef.current.set(targetId, false)
       }
     }
 
-    // Store connection
-    const connection: PeerConnection = { peerId: targetId, pc, name: targetName }
-    peersRef.current.set(targetId, connection)
     syncPeers()
 
     // If initiator, create and send offer
     if (isInitiator) {
       makingOfferRef.current.set(targetId, true)
+      log('Creating initial offer to', targetId)
       pc.createOffer()
         .then(offer => pc.setLocalDescription(offer))
         .then(() => {
-          if (pc.localDescription && mountedRef.current) {
-            sendSignal({
-              roomId,
+          if (pc.localDescription && mountedRef.current && currentRoomIdRef.current) {
+            log('Sending initial offer to', targetId)
+            return sendSignal({
+              roomId: currentRoomIdRef.current,
               from: peerId,
               to: targetId,
               signal: JSON.stringify({ type: 'offer', sdp: pc.localDescription }),
-            }).catch(() => {})
+            })
           }
         })
-        .catch(() => {})
+        .catch(err => log('Failed to create/send offer:', err))
         .finally(() => {
           makingOfferRef.current.set(targetId, false)
         })
@@ -338,14 +393,19 @@ export function useWebRTC(roomId: Id<"rooms"> | null, userName: string) {
   const handleSignal = useCallback(async (fromId: string, signalData: string, fromName: string) => {
     try {
       const signal = JSON.parse(signalData)
+      log('Handling signal from', fromId, 'type:', signal.type)
 
       let conn = peersRef.current.get(fromId)
 
       if (signal.type === 'offer') {
         // Create connection if doesn't exist (we're the answerer)
         if (!conn) {
+          log('Creating peer connection for incoming offer from', fromId)
           const pc = createPeerConnection(fromId, fromName, false)
-          if (!pc) return
+          if (!pc) {
+            log('Failed to create peer connection')
+            return
+          }
           conn = peersRef.current.get(fromId)
         }
 
@@ -359,28 +419,35 @@ export function useWebRTC(roomId: Id<"rooms"> | null, userName: string) {
           const ignoreOffer = !polite && offerCollision
 
           if (ignoreOffer) {
+            log('Ignoring offer due to glare, we are impolite peer')
             return
           }
 
+          log('Setting remote description from offer')
           await conn.pc.setRemoteDescription(new RTCSessionDescription(signal.sdp))
 
           // Apply any pending ICE candidates
           const pending = pendingCandidatesRef.current.get(fromId) || []
-          for (const candidate of pending) {
-            try {
-              await conn.pc.addIceCandidate(new RTCIceCandidate(candidate))
-            } catch {
-              // Invalid candidate
+          if (pending.length > 0) {
+            log('Applying', pending.length, 'pending ICE candidates')
+            for (const candidate of pending) {
+              try {
+                await conn.pc.addIceCandidate(new RTCIceCandidate(candidate))
+              } catch (err) {
+                log('Failed to add pending candidate:', err)
+              }
             }
+            pendingCandidatesRef.current.delete(fromId)
           }
-          pendingCandidatesRef.current.delete(fromId)
 
+          log('Creating answer')
           const answer = await conn.pc.createAnswer()
           await conn.pc.setLocalDescription(answer)
 
-          if (conn.pc.localDescription && mountedRef.current && roomId) {
+          if (conn.pc.localDescription && mountedRef.current && currentRoomIdRef.current) {
+            log('Sending answer to', fromId)
             await sendSignal({
-              roomId,
+              roomId: currentRoomIdRef.current,
               from: peerId,
               to: fromId,
               signal: JSON.stringify({ type: 'answer', sdp: conn.pc.localDescription }),
@@ -389,26 +456,32 @@ export function useWebRTC(roomId: Id<"rooms"> | null, userName: string) {
         }
       } else if (signal.type === 'answer') {
         if (conn && conn.pc.signalingState === 'have-local-offer') {
+          log('Setting remote description from answer')
           await conn.pc.setRemoteDescription(new RTCSessionDescription(signal.sdp))
 
           // Apply any pending ICE candidates
           const pending = pendingCandidatesRef.current.get(fromId) || []
-          for (const candidate of pending) {
-            try {
-              await conn.pc.addIceCandidate(new RTCIceCandidate(candidate))
-            } catch {
-              // Invalid candidate
+          if (pending.length > 0) {
+            log('Applying', pending.length, 'pending ICE candidates')
+            for (const candidate of pending) {
+              try {
+                await conn.pc.addIceCandidate(new RTCIceCandidate(candidate))
+              } catch (err) {
+                log('Failed to add pending candidate:', err)
+              }
             }
+            pendingCandidatesRef.current.delete(fromId)
           }
-          pendingCandidatesRef.current.delete(fromId)
+        } else {
+          log('Ignoring answer - wrong signaling state:', conn?.pc.signalingState)
         }
       } else if (signal.type === 'candidate') {
         // Handle single candidate (legacy)
         if (conn && conn.pc.remoteDescription) {
           try {
             await conn.pc.addIceCandidate(new RTCIceCandidate(signal.candidate))
-          } catch {
-            // Invalid candidate
+          } catch (err) {
+            log('Failed to add candidate:', err)
           }
         } else {
           const pending = pendingCandidatesRef.current.get(fromId) || []
@@ -417,12 +490,13 @@ export function useWebRTC(roomId: Id<"rooms"> | null, userName: string) {
         }
       } else if (signal.type === 'candidates') {
         // Handle batched candidates
+        log('Processing', signal.candidates.length, 'batched candidates from', fromId)
         for (const candidate of signal.candidates) {
           if (conn && conn.pc.remoteDescription) {
             try {
               await conn.pc.addIceCandidate(new RTCIceCandidate(candidate))
-            } catch {
-              // Invalid candidate
+            } catch (err) {
+              log('Failed to add batched candidate:', err)
             }
           } else {
             const pending = pendingCandidatesRef.current.get(fromId) || []
@@ -431,10 +505,10 @@ export function useWebRTC(roomId: Id<"rooms"> | null, userName: string) {
           }
         }
       }
-    } catch {
-      // Signal handling error
+    } catch (err) {
+      log('Signal handling error:', err)
     }
-  }, [createPeerConnection, roomId, peerId, sendSignal])
+  }, [createPeerConnection, peerId, sendSignal])
 
   // Setup on mount
   useEffect(() => {
@@ -442,10 +516,14 @@ export function useWebRTC(roomId: Id<"rooms"> | null, userName: string) {
 
     let isActive = true
     mountedRef.current = true
+    currentRoomIdRef.current = roomId
+
+    log('Setting up WebRTC for room', roomId)
 
     const setup = async () => {
       const stream = await initStream()
       if (!isActive || !mountedRef.current) {
+        log('Component unmounted during stream init')
         return
       }
 
@@ -453,10 +531,12 @@ export function useWebRTC(roomId: Id<"rooms"> | null, userName: string) {
         // Clean up stale signals for this room before joining (non-blocking)
         cleanupStaleSignals({ roomId }).catch(() => {})
 
+        log('Joining room')
         await joinRoom({ roomId, peerId, name: userName })
         hasJoinedRef.current = true
 
         if (isActive && mountedRef.current) {
+          log('Setting isReady to true')
           setIsReady(true)
           if (!stream) {
             setIsVideoOff(true)
@@ -464,7 +544,6 @@ export function useWebRTC(roomId: Id<"rooms"> | null, userName: string) {
           }
 
           // Sync initial muted/video state with server
-          // Use setTimeout to ensure state has been set
           setTimeout(() => {
             const audioTrack = localStreamRef.current?.getAudioTracks()[0]
             const videoTrack = localStreamRef.current?.getVideoTracks()[0]
@@ -473,7 +552,8 @@ export function useWebRTC(roomId: Id<"rooms"> | null, userName: string) {
             updateParticipant({ peerId, isMuted: currentMuted, isVideoOff: currentVideoOff }).catch(() => {})
           }, 100)
         }
-      } catch {
+      } catch (err) {
+        log('Failed to join room:', err)
         if (isActive && mountedRef.current) {
           setIsReady(true)
         }
@@ -485,6 +565,7 @@ export function useWebRTC(roomId: Id<"rooms"> | null, userName: string) {
     return () => {
       isActive = false
       mountedRef.current = false
+      currentRoomIdRef.current = null
     }
   }, [roomId, userName, peerId, initStream, joinRoom, cleanupStaleSignals, updateParticipant])
 
@@ -499,26 +580,19 @@ export function useWebRTC(roomId: Id<"rooms"> | null, userName: string) {
     return () => window.removeEventListener('beforeunload', handleBeforeUnload)
   }, [peerId, leaveRoom])
 
-  // Heartbeat every 25 seconds to keep participant alive
-  // Uses visibility API to pause when tab is hidden (saves bandwidth)
-  // Stale threshold is 60s, so 2 missed heartbeats = cleanup
+  // Heartbeat every 25 seconds
   useEffect(() => {
     if (!isReady || !hasJoinedRef.current) return
 
     const sendHeartbeat = () => {
-      // Only send if tab is visible and we're still in the room
       if (document.visibilityState === 'visible' && hasJoinedRef.current && mountedRef.current) {
         heartbeat({ peerId }).catch(() => {})
       }
     }
 
-    // Send initial heartbeat
     sendHeartbeat()
+    const interval = setInterval(sendHeartbeat, 25000)
 
-    // Regular interval
-    const interval = setInterval(sendHeartbeat, 25000) // 25 seconds
-
-    // Also send heartbeat when tab becomes visible again
     const handleVisibilityChange = () => {
       if (document.visibilityState === 'visible') {
         sendHeartbeat()
@@ -535,6 +609,7 @@ export function useWebRTC(roomId: Id<"rooms"> | null, userName: string) {
   // Cleanup on unmount
   useEffect(() => {
     return () => {
+      log('Cleaning up WebRTC')
       localStreamRef.current?.getTracks().forEach(t => t.stop())
       localStreamRef.current = null
       screenStreamRef.current?.getTracks().forEach(t => t.stop())
@@ -545,7 +620,6 @@ export function useWebRTC(roomId: Id<"rooms"> | null, userName: string) {
       pendingCandidatesRef.current.clear()
       processedSignalsRef.current.clear()
       hasJoinedRef.current = false
-      // Clear ICE batch timers
       iceBatchTimerRef.current.forEach(timer => clearTimeout(timer))
       iceBatchTimerRef.current.clear()
       iceBatchRef.current.clear()
@@ -558,11 +632,13 @@ export function useWebRTC(roomId: Id<"rooms"> | null, userName: string) {
     if (!participants || !isReady) return
 
     const others = participants.filter(p => p.peerId !== peerId)
+    log('Participants updated:', others.length, 'others in room')
 
     others.forEach(p => {
       if (!peersRef.current.has(p.peerId)) {
         // Determine who initiates based on peerId comparison
         const shouldInitiate = peerId > p.peerId
+        log('New participant:', p.name, 'shouldInitiate:', shouldInitiate)
         createPeerConnection(p.peerId, p.name, shouldInitiate)
       }
     })
@@ -571,6 +647,7 @@ export function useWebRTC(roomId: Id<"rooms"> | null, userName: string) {
     const activeIds = new Set(others.map(p => p.peerId))
     peersRef.current.forEach((conn, id) => {
       if (!activeIds.has(id)) {
+        log('Removing departed peer:', id)
         conn.pc.close()
         peersRef.current.delete(id)
       }
@@ -578,13 +655,15 @@ export function useWebRTC(roomId: Id<"rooms"> | null, userName: string) {
     syncPeers()
   }, [participants, peerId, createPeerConnection, isReady, syncPeers])
 
-  // Handle signals - client-side TTL filtering and batch consumption
+  // Handle signals
   useEffect(() => {
     if (!signals || !isReady || signals.length === 0) return
 
     const now = Date.now()
     const staleThreshold = now - SIGNAL_TTL_MS
     const signalsToConsume: typeof signals[0]['_id'][] = []
+
+    log('Processing', signals.length, 'signals')
 
     for (const signal of signals) {
       // Skip already processed signals
@@ -593,6 +672,14 @@ export function useWebRTC(roomId: Id<"rooms"> | null, userName: string) {
 
       // Client-side TTL check - skip stale signals
       if (signal.timestamp < staleThreshold) {
+        log('Skipping stale signal from', signal.from)
+        signalsToConsume.push(signal._id)
+        continue
+      }
+
+      // Only process signals for the current room
+      if (currentRoomIdRef.current && signal.roomId !== currentRoomIdRef.current) {
+        log('Skipping signal from different room')
         signalsToConsume.push(signal._id)
         continue
       }
@@ -614,14 +701,12 @@ export function useWebRTC(roomId: Id<"rooms"> | null, userName: string) {
   const toggleMute = useCallback(() => {
     const track = localStreamRef.current?.getAudioTracks()[0]
     if (track) {
-      // Toggle track enabled state
       track.enabled = !track.enabled
-      // isMuted is true when track is disabled (not enabled)
       const newMutedState = !track.enabled
+      log('Toggled mute:', newMutedState)
       setIsMuted(newMutedState)
       updateParticipant({ peerId, isMuted: newMutedState }).catch(() => {})
     } else {
-      // No audio track - toggle state anyway for UI
       setIsMuted(prev => {
         const newState = !prev
         updateParticipant({ peerId, isMuted: newState }).catch(() => {})
@@ -633,10 +718,9 @@ export function useWebRTC(roomId: Id<"rooms"> | null, userName: string) {
   const toggleVideo = useCallback(() => {
     const track = localStreamRef.current?.getVideoTracks()[0]
     if (track) {
-      // Toggle track enabled state
       track.enabled = !track.enabled
-      // isVideoOff is true when track is disabled (not enabled)
       const newVideoOffState = !track.enabled
+      log('Toggled video:', newVideoOffState)
       setIsVideoOff(newVideoOffState)
       updateParticipant({ peerId, isVideoOff: newVideoOffState }).catch(() => {})
     } else {
@@ -651,21 +735,19 @@ export function useWebRTC(roomId: Id<"rooms"> | null, userName: string) {
   // Stop screen sharing and restore camera
   const stopScreenShare = useCallback(() => {
     if (!screenStreamRef.current) return
+    log('Stopping screen share')
 
-    // Stop screen tracks
     screenStreamRef.current.getTracks().forEach(track => track.stop())
 
-    // Restore original video track in all peer connections
     const originalTrack = originalVideoTrackRef.current
     if (originalTrack) {
       peersRef.current.forEach(({ pc }) => {
         const sender = pc.getSenders().find(s => s.track?.kind === 'video')
         if (sender) {
-          sender.replaceTrack(originalTrack).catch(() => {})
+          sender.replaceTrack(originalTrack).catch(err => log('Failed to restore camera track:', err))
         }
       })
 
-      // Update local stream to show camera again
       if (localStreamRef.current) {
         const oldVideoTrack = localStreamRef.current.getVideoTracks()[0]
         if (oldVideoTrack) {
@@ -690,7 +772,7 @@ export function useWebRTC(roomId: Id<"rooms"> | null, userName: string) {
     }
 
     try {
-      // Get screen stream
+      log('Starting screen share')
       const stream = await navigator.mediaDevices.getDisplayMedia({
         video: true,
         audio: false,
@@ -702,27 +784,33 @@ export function useWebRTC(roomId: Id<"rooms"> | null, userName: string) {
       }
 
       const screenTrack = stream.getVideoTracks()[0]
+      log('Got screen track:', screenTrack.label)
 
-      // Handle when user stops sharing via browser UI
       screenTrack.onended = () => {
+        log('Screen share ended by browser')
         stopScreenShare()
       }
 
-      // Store original camera track before replacing
       const currentVideoTrack = localStreamRef.current?.getVideoTracks()[0]
       if (currentVideoTrack) {
         originalVideoTrackRef.current = currentVideoTrack
       }
 
       // Replace video track in all peer connections
+      let replacedCount = 0
       peersRef.current.forEach(({ pc }) => {
         const sender = pc.getSenders().find(s => s.track?.kind === 'video')
         if (sender) {
-          sender.replaceTrack(screenTrack).catch(() => {})
+          sender.replaceTrack(screenTrack)
+            .then(() => {
+              replacedCount++
+              log('Replaced track in peer connection')
+            })
+            .catch(err => log('Failed to replace track:', err))
         }
       })
 
-      // Update local stream to show screen share
+      // Update local stream
       if (localStreamRef.current && currentVideoTrack) {
         localStreamRef.current.removeTrack(currentVideoTrack)
         localStreamRef.current.addTrack(screenTrack)
@@ -732,8 +820,9 @@ export function useWebRTC(roomId: Id<"rooms"> | null, userName: string) {
       screenStreamRef.current = stream
       setScreenStream(stream)
       setIsScreenSharing(true)
-    } catch {
-      // User cancelled or error occurred
+      log('Screen share started, replaced in', replacedCount, 'connections')
+    } catch (err) {
+      log('Screen share error:', err)
     }
   }, [isScreenSharing, stopScreenShare])
 

@@ -803,13 +803,16 @@ interface VideoTileProps {
 function VideoTile({ tile, className = '', compact = false }: VideoTileProps) {
   const videoRef = useRef<HTMLVideoElement>(null)
   const [streamKey, setStreamKey] = useState(0)
+  const [hasError, setHasError] = useState(false)
 
   // Track stream changes and force updates when tracks change
   useEffect(() => {
     if (!tile.stream) return
 
     const handleTrackChange = () => {
+      console.log('[VideoTile] Track changed for', tile.name)
       setStreamKey(prev => prev + 1)
+      setHasError(false)
     }
 
     // Listen for track additions
@@ -820,22 +823,49 @@ function VideoTile({ tile, className = '', compact = false }: VideoTileProps) {
       tile.stream?.removeEventListener('addtrack', handleTrackChange)
       tile.stream?.removeEventListener('removetrack', handleTrackChange)
     }
-  }, [tile.stream])
+  }, [tile.stream, tile.name])
 
   // Attach stream to video element when stream or tracks change
   useEffect(() => {
     const video = videoRef.current
     if (video && tile.stream) {
+      console.log('[VideoTile] Setting stream for', tile.name, 'tracks:', tile.stream.getTracks().map(t => `${t.kind}:${t.enabled}`))
+
       // Always set srcObject to ensure tracks are picked up
       video.srcObject = tile.stream
-      // Play video (needed for remote streams)
-      video.play().catch(() => {
-        // Autoplay blocked, will show controls or user needs to interact
-      })
+
+      // Reset error state
+      setHasError(false)
+
+      // Play video with retry logic
+      const playVideo = async () => {
+        try {
+          await video.play()
+          console.log('[VideoTile] Video playing for', tile.name)
+        } catch (err) {
+          console.log('[VideoTile] Play failed for', tile.name, err)
+          // Try again with muted (browsers allow muted autoplay)
+          if (!tile.isLocal) {
+            video.muted = true
+            try {
+              await video.play()
+              console.log('[VideoTile] Video playing muted for', tile.name)
+              // Unmute after a short delay
+              setTimeout(() => {
+                video.muted = false
+              }, 100)
+            } catch {
+              setHasError(true)
+            }
+          }
+        }
+      }
+
+      playVideo()
     } else if (video && !tile.stream) {
       video.srcObject = null
     }
-  }, [tile.stream, streamKey])
+  }, [tile.stream, tile.name, tile.isLocal, streamKey])
 
   // Don't mirror when screen sharing
   const shouldMirror = tile.isLocal && !tile.isScreenSharing
