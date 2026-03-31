@@ -66,6 +66,7 @@ export function useWebRTC(roomId: Id<"rooms"> | null, userName: string) {
   const hasJoinedRef = useRef(false)
   const iceBatchRef = useRef<Map<string, RTCIceCandidateInit[]>>(new Map())
   const iceBatchTimerRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
+  const makingOfferRef = useRef<Map<string, boolean>>(new Map())
 
   const joinRoom = useMutation(api.rooms.joinRoom)
   const leaveRoom = useMutation(api.rooms.leaveRoom)
@@ -243,17 +244,32 @@ export function useWebRTC(roomId: Id<"rooms"> | null, userName: string) {
     }
 
     pc.oniceconnectionstatechange = () => {
-      // Connection state changed
+      const state = pc.iceConnectionState
+      if (state === 'failed') {
+        // Try to restart ICE
+        pc.restartIce()
+      }
     }
 
     // Handle remote tracks
     pc.ontrack = (event) => {
       const conn = peersRef.current.get(targetId)
       if (conn) {
-        // Use the stream from the event if available, otherwise create new one
-        const remoteStream = event.streams[0] || new MediaStream([event.track])
+        // Use the stream from the event if available
+        let remoteStream: MediaStream
 
-        // Update the connection with the new stream reference
+        if (event.streams[0]) {
+          remoteStream = event.streams[0]
+        } else if (conn.stream) {
+          // Add track to existing stream if we already have one
+          conn.stream.addTrack(event.track)
+          remoteStream = conn.stream
+        } else {
+          // Create new stream with this track
+          remoteStream = new MediaStream([event.track])
+        }
+
+        // Update the connection with the stream reference
         const updatedConn = { ...conn, stream: remoteStream }
         peersRef.current.set(targetId, updatedConn)
 
@@ -264,6 +280,31 @@ export function useWebRTC(roomId: Id<"rooms"> | null, userName: string) {
       }
     }
 
+    // Handle negotiation needed (for renegotiation)
+    pc.onnegotiationneeded = async () => {
+      if (makingOfferRef.current.get(targetId)) return
+
+      try {
+        makingOfferRef.current.set(targetId, true)
+        const offer = await pc.createOffer()
+        if (pc.signalingState !== 'stable') return
+        await pc.setLocalDescription(offer)
+
+        if (pc.localDescription && mountedRef.current) {
+          sendSignal({
+            roomId,
+            from: peerId,
+            to: targetId,
+            signal: JSON.stringify({ type: 'offer', sdp: pc.localDescription }),
+          }).catch(() => {})
+        }
+      } catch {
+        // Negotiation error
+      } finally {
+        makingOfferRef.current.set(targetId, false)
+      }
+    }
+
     // Store connection
     const connection: PeerConnection = { peerId: targetId, pc, name: targetName }
     peersRef.current.set(targetId, connection)
@@ -271,6 +312,7 @@ export function useWebRTC(roomId: Id<"rooms"> | null, userName: string) {
 
     // If initiator, create and send offer
     if (isInitiator) {
+      makingOfferRef.current.set(targetId, true)
       pc.createOffer()
         .then(offer => pc.setLocalDescription(offer))
         .then(() => {
@@ -284,6 +326,9 @@ export function useWebRTC(roomId: Id<"rooms"> | null, userName: string) {
           }
         })
         .catch(() => {})
+        .finally(() => {
+          makingOfferRef.current.set(targetId, false)
+        })
     }
 
     return pc
@@ -305,12 +350,28 @@ export function useWebRTC(roomId: Id<"rooms"> | null, userName: string) {
         }
 
         if (conn) {
+          // Handle glare (both sides sent offer)
+          const offerCollision = makingOfferRef.current.get(fromId) ||
+            (conn.pc.signalingState !== 'stable')
+
+          // Use polite peer pattern - lower peerId is polite
+          const polite = peerId < fromId
+          const ignoreOffer = !polite && offerCollision
+
+          if (ignoreOffer) {
+            return
+          }
+
           await conn.pc.setRemoteDescription(new RTCSessionDescription(signal.sdp))
 
           // Apply any pending ICE candidates
           const pending = pendingCandidatesRef.current.get(fromId) || []
           for (const candidate of pending) {
-            await conn.pc.addIceCandidate(new RTCIceCandidate(candidate))
+            try {
+              await conn.pc.addIceCandidate(new RTCIceCandidate(candidate))
+            } catch {
+              // Invalid candidate
+            }
           }
           pendingCandidatesRef.current.delete(fromId)
 
@@ -333,14 +394,22 @@ export function useWebRTC(roomId: Id<"rooms"> | null, userName: string) {
           // Apply any pending ICE candidates
           const pending = pendingCandidatesRef.current.get(fromId) || []
           for (const candidate of pending) {
-            await conn.pc.addIceCandidate(new RTCIceCandidate(candidate))
+            try {
+              await conn.pc.addIceCandidate(new RTCIceCandidate(candidate))
+            } catch {
+              // Invalid candidate
+            }
           }
           pendingCandidatesRef.current.delete(fromId)
         }
       } else if (signal.type === 'candidate') {
         // Handle single candidate (legacy)
         if (conn && conn.pc.remoteDescription) {
-          await conn.pc.addIceCandidate(new RTCIceCandidate(signal.candidate))
+          try {
+            await conn.pc.addIceCandidate(new RTCIceCandidate(signal.candidate))
+          } catch {
+            // Invalid candidate
+          }
         } else {
           const pending = pendingCandidatesRef.current.get(fromId) || []
           pending.push(signal.candidate)
@@ -350,7 +419,11 @@ export function useWebRTC(roomId: Id<"rooms"> | null, userName: string) {
         // Handle batched candidates
         for (const candidate of signal.candidates) {
           if (conn && conn.pc.remoteDescription) {
-            await conn.pc.addIceCandidate(new RTCIceCandidate(candidate))
+            try {
+              await conn.pc.addIceCandidate(new RTCIceCandidate(candidate))
+            } catch {
+              // Invalid candidate
+            }
           } else {
             const pending = pendingCandidatesRef.current.get(fromId) || []
             pending.push(candidate)
@@ -476,6 +549,7 @@ export function useWebRTC(roomId: Id<"rooms"> | null, userName: string) {
       iceBatchTimerRef.current.forEach(timer => clearTimeout(timer))
       iceBatchTimerRef.current.clear()
       iceBatchRef.current.clear()
+      makingOfferRef.current.clear()
     }
   }, [])
 
@@ -540,22 +614,37 @@ export function useWebRTC(roomId: Id<"rooms"> | null, userName: string) {
   const toggleMute = useCallback(() => {
     const track = localStreamRef.current?.getAudioTracks()[0]
     if (track) {
+      // Toggle track enabled state
       track.enabled = !track.enabled
-      setIsMuted(!track.enabled)
-      updateParticipant({ peerId, isMuted: !track.enabled }).catch(() => {})
+      // isMuted is true when track is disabled (not enabled)
+      const newMutedState = !track.enabled
+      setIsMuted(newMutedState)
+      updateParticipant({ peerId, isMuted: newMutedState }).catch(() => {})
     } else {
-      setIsMuted(prev => !prev)
+      // No audio track - toggle state anyway for UI
+      setIsMuted(prev => {
+        const newState = !prev
+        updateParticipant({ peerId, isMuted: newState }).catch(() => {})
+        return newState
+      })
     }
   }, [peerId, updateParticipant])
 
   const toggleVideo = useCallback(() => {
     const track = localStreamRef.current?.getVideoTracks()[0]
     if (track) {
+      // Toggle track enabled state
       track.enabled = !track.enabled
-      setIsVideoOff(!track.enabled)
-      updateParticipant({ peerId, isVideoOff: !track.enabled }).catch(() => {})
+      // isVideoOff is true when track is disabled (not enabled)
+      const newVideoOffState = !track.enabled
+      setIsVideoOff(newVideoOffState)
+      updateParticipant({ peerId, isVideoOff: newVideoOffState }).catch(() => {})
     } else {
-      setIsVideoOff(prev => !prev)
+      setIsVideoOff(prev => {
+        const newState = !prev
+        updateParticipant({ peerId, isVideoOff: newState }).catch(() => {})
+        return newState
+      })
     }
   }, [peerId, updateParticipant])
 

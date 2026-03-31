@@ -802,20 +802,40 @@ interface VideoTileProps {
 
 function VideoTile({ tile, className = '', compact = false }: VideoTileProps) {
   const videoRef = useRef<HTMLVideoElement>(null)
+  const [streamKey, setStreamKey] = useState(0)
 
-  // Attach stream to video element when stream changes
+  // Track stream changes and force updates when tracks change
+  useEffect(() => {
+    if (!tile.stream) return
+
+    const handleTrackChange = () => {
+      setStreamKey(prev => prev + 1)
+    }
+
+    // Listen for track additions
+    tile.stream.addEventListener('addtrack', handleTrackChange)
+    tile.stream.addEventListener('removetrack', handleTrackChange)
+
+    return () => {
+      tile.stream?.removeEventListener('addtrack', handleTrackChange)
+      tile.stream?.removeEventListener('removetrack', handleTrackChange)
+    }
+  }, [tile.stream])
+
+  // Attach stream to video element when stream or tracks change
   useEffect(() => {
     const video = videoRef.current
     if (video && tile.stream) {
-      if (video.srcObject !== tile.stream) {
-        video.srcObject = tile.stream
-      }
+      // Always set srcObject to ensure tracks are picked up
+      video.srcObject = tile.stream
       // Play video (needed for remote streams)
       video.play().catch(() => {
         // Autoplay blocked, will show controls or user needs to interact
       })
+    } else if (video && !tile.stream) {
+      video.srcObject = null
     }
-  }, [tile.stream])
+  }, [tile.stream, streamKey])
 
   // Don't mirror when screen sharing
   const shouldMirror = tile.isLocal && !tile.isScreenSharing
