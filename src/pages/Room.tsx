@@ -801,22 +801,34 @@ interface VideoTileProps {
 }
 
 function VideoTile({ tile, className = '', compact = false }: VideoTileProps) {
-  // Use a ref callback to ensure srcObject is set whenever the video element mounts
-  // This fixes the issue where toggling video off/on wouldn't reconnect the stream
-  const setVideoRef = useCallback((el: HTMLVideoElement | null) => {
-    if (el && tile.stream) {
-      el.srcObject = tile.stream
+  const videoRef = useRef<HTMLVideoElement>(null)
+
+  // Attach stream to video element when stream changes
+  useEffect(() => {
+    const video = videoRef.current
+    if (video && tile.stream) {
+      if (video.srcObject !== tile.stream) {
+        video.srcObject = tile.stream
+      }
+      // Play video (needed for remote streams)
+      video.play().catch(() => {
+        // Autoplay blocked, will show controls or user needs to interact
+      })
     }
   }, [tile.stream])
 
   // Don't mirror when screen sharing
   const shouldMirror = tile.isLocal && !tile.isScreenSharing
 
+  // Show video if we have a stream with video tracks
+  const hasVideoTrack = tile.stream && tile.stream.getVideoTracks().length > 0
+  const showVideo = hasVideoTrack && !tile.isVideoOff
+
   return (
     <div className={`relative bg-secondary rounded-xl overflow-hidden ${className}`}>
-      {tile.stream && !tile.isVideoOff ? (
+      {showVideo ? (
         <video
-          ref={setVideoRef}
+          ref={videoRef}
           autoPlay
           playsInline
           muted={tile.isLocal}

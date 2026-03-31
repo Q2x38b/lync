@@ -250,11 +250,17 @@ export function useWebRTC(roomId: Id<"rooms"> | null, userName: string) {
     pc.ontrack = (event) => {
       const conn = peersRef.current.get(targetId)
       if (conn) {
-        if (!conn.stream) {
-          conn.stream = new MediaStream()
+        // Use the stream from the event if available, otherwise create new one
+        const remoteStream = event.streams[0] || new MediaStream([event.track])
+
+        // Update the connection with the new stream reference
+        const updatedConn = { ...conn, stream: remoteStream }
+        peersRef.current.set(targetId, updatedConn)
+
+        // Force React to see the change by creating a new Map
+        if (mountedRef.current) {
+          setPeers(new Map(peersRef.current))
         }
-        conn.stream.addTrack(event.track)
-        syncPeers()
       }
     }
 
