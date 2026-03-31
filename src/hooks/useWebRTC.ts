@@ -22,26 +22,34 @@ function getOrCreatePeerId(): string {
 }
 
 const ICE_SERVERS: RTCIceServer[] = [
+  // Multiple STUN servers for reliability
   { urls: 'stun:stun.l.google.com:19302' },
   { urls: 'stun:stun1.l.google.com:19302' },
   { urls: 'stun:stun2.l.google.com:19302' },
-  // Free TURN servers
+  { urls: 'stun:stun3.l.google.com:19302' },
+  { urls: 'stun:stun4.l.google.com:19302' },
+  // OpenRelay TURN servers (free, public)
   {
-    urls: 'turn:a.relay.metered.ca:80',
-    username: 'e8dd65b92c62d5e82c2f018a',
-    credential: 'uWdWNmkhvyqTEj3B',
+    urls: 'turn:openrelay.metered.ca:80',
+    username: 'openrelayproject',
+    credential: 'openrelayproject',
   },
   {
-    urls: 'turn:a.relay.metered.ca:443',
-    username: 'e8dd65b92c62d5e82c2f018a',
-    credential: 'uWdWNmkhvyqTEj3B',
+    urls: 'turn:openrelay.metered.ca:443',
+    username: 'openrelayproject',
+    credential: 'openrelayproject',
   },
   {
-    urls: 'turn:a.relay.metered.ca:443?transport=tcp',
-    username: 'e8dd65b92c62d5e82c2f018a',
-    credential: 'uWdWNmkhvyqTEj3B',
+    urls: 'turn:openrelay.metered.ca:443?transport=tcp',
+    username: 'openrelayproject',
+    credential: 'openrelayproject',
   },
+  // Twilio STUN (no TURN, but reliable for gathering)
+  { urls: 'stun:global.stun.twilio.com:3478' },
 ]
+
+// Connection timeout - if ICE doesn't connect within this time, restart
+const ICE_CONNECTION_TIMEOUT_MS = 15000
 
 // Client-side signal TTL (30 seconds) - signals older than this are ignored
 const SIGNAL_TTL_MS = 30 * 1000
@@ -74,6 +82,8 @@ export function useWebRTC(roomId: Id<"rooms"> | null, userName: string) {
   const iceBatchTimerRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
   const makingOfferRef = useRef<Map<string, boolean>>(new Map())
   const currentRoomIdRef = useRef<Id<"rooms"> | null>(null)
+  const connectionTimeoutRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
+  const iceRestartAttemptsRef = useRef<Map<string, number>>(new Map())
 
   const joinRoom = useMutation(api.rooms.joinRoom)
   const leaveRoom = useMutation(api.rooms.leaveRoom)
@@ -224,9 +234,10 @@ export function useWebRTC(roomId: Id<"rooms"> | null, userName: string) {
     // Add local tracks BEFORE storing the connection
     if (localStreamRef.current) {
       const tracks = localStreamRef.current.getTracks()
-      log('Adding', tracks.length, 'local tracks to peer connection')
+      log('Adding', tracks.length, 'local tracks to peer connection:', tracks.map(t => `${t.kind}:${t.enabled}:${t.readyState}`))
       tracks.forEach(track => {
-        pc.addTrack(track, localStreamRef.current!)
+        const sender = pc.addTrack(track, localStreamRef.current!)
+        log('Added track', track.kind, 'sender:', sender ? 'success' : 'failed')
       })
     } else {
       log('Warning: No local stream available when creating peer connection')
@@ -271,16 +282,63 @@ export function useWebRTC(roomId: Id<"rooms"> | null, userName: string) {
     pc.oniceconnectionstatechange = () => {
       const state = pc.iceConnectionState
       log('ICE connection state changed to', state, 'for', targetId)
-      if (state === 'failed') {
-        log('ICE connection failed, restarting ICE')
-        pc.restartIce()
+
+      // Clear any existing timeout
+      const existingTimeout = connectionTimeoutRef.current.get(targetId)
+      if (existingTimeout) {
+        clearTimeout(existingTimeout)
+        connectionTimeoutRef.current.delete(targetId)
+      }
+
+      if (state === 'checking' || state === 'new') {
+        // Set timeout to detect stuck connections
+        const timeout = setTimeout(() => {
+          const currentState = pc.iceConnectionState
+          if (currentState === 'checking' || currentState === 'new') {
+            const attempts = iceRestartAttemptsRef.current.get(targetId) || 0
+            if (attempts < 3) {
+              log('ICE connection timeout, restarting ICE (attempt', attempts + 1, ')')
+              iceRestartAttemptsRef.current.set(targetId, attempts + 1)
+              pc.restartIce()
+            } else {
+              log('ICE connection failed after 3 restart attempts')
+            }
+          }
+        }, ICE_CONNECTION_TIMEOUT_MS)
+        connectionTimeoutRef.current.set(targetId, timeout)
+      } else if (state === 'failed') {
+        const attempts = iceRestartAttemptsRef.current.get(targetId) || 0
+        if (attempts < 3) {
+          log('ICE connection failed, restarting ICE (attempt', attempts + 1, ')')
+          iceRestartAttemptsRef.current.set(targetId, attempts + 1)
+          pc.restartIce()
+        } else {
+          log('ICE connection failed permanently after 3 attempts')
+        }
       } else if (state === 'connected' || state === 'completed') {
         log('ICE connection established with', targetId)
+        iceRestartAttemptsRef.current.delete(targetId)
+      } else if (state === 'disconnected') {
+        // Set a short timeout before restart - disconnected can recover
+        const timeout = setTimeout(() => {
+          if (pc.iceConnectionState === 'disconnected') {
+            log('ICE still disconnected, restarting')
+            pc.restartIce()
+          }
+        }, 3000)
+        connectionTimeoutRef.current.set(targetId, timeout)
       }
+    }
+
+    pc.onicegatheringstatechange = () => {
+      log('ICE gathering state changed to', pc.iceGatheringState, 'for', targetId)
     }
 
     pc.onconnectionstatechange = () => {
       log('Connection state changed to', pc.connectionState, 'for', targetId)
+      if (pc.connectionState === 'failed') {
+        log('Peer connection failed for', targetId)
+      }
     }
 
     // Handle remote tracks
@@ -338,11 +396,18 @@ export function useWebRTC(roomId: Id<"rooms"> | null, userName: string) {
       try {
         makingOfferRef.current.set(targetId, true)
         log('Creating offer for', targetId, 'due to negotiation needed')
-        const offer = await pc.createOffer()
+        const offer = await pc.createOffer({
+          offerToReceiveAudio: true,
+          offerToReceiveVideo: true,
+        })
         if (pc.signalingState !== 'stable') {
           log('Signaling state not stable, aborting offer')
           return
         }
+        // Log what's in the offer
+        const hasAudio = offer.sdp?.includes('m=audio') || false
+        const hasVideo = offer.sdp?.includes('m=video') || false
+        log('Renegotiation offer - audio:', hasAudio, 'video:', hasVideo)
         await pc.setLocalDescription(offer)
 
         if (pc.localDescription && mountedRef.current && currentRoomIdRef.current) {
@@ -367,8 +432,21 @@ export function useWebRTC(roomId: Id<"rooms"> | null, userName: string) {
     if (isInitiator) {
       makingOfferRef.current.set(targetId, true)
       log('Creating initial offer to', targetId)
-      pc.createOffer()
-        .then(offer => pc.setLocalDescription(offer))
+      // Log senders to verify both tracks are added
+      const senders = pc.getSenders()
+      log('Peer connection has', senders.length, 'senders:', senders.map(s => s.track?.kind || 'null'))
+
+      pc.createOffer({
+        offerToReceiveAudio: true,
+        offerToReceiveVideo: true,
+      })
+        .then(offer => {
+          // Log what's in the offer SDP
+          const hasAudio = offer.sdp?.includes('m=audio') || false
+          const hasVideo = offer.sdp?.includes('m=video') || false
+          log('Created offer - audio:', hasAudio, 'video:', hasVideo)
+          return pc.setLocalDescription(offer)
+        })
         .then(() => {
           if (pc.localDescription && mountedRef.current && currentRoomIdRef.current) {
             log('Sending initial offer to', targetId)
@@ -424,6 +502,11 @@ export function useWebRTC(roomId: Id<"rooms"> | null, userName: string) {
           }
 
           log('Setting remote description from offer')
+          // Log what media is in the offer
+          const sdp = signal.sdp.sdp || ''
+          const hasAudio = sdp.includes('m=audio')
+          const hasVideo = sdp.includes('m=video')
+          log('Offer contains - audio:', hasAudio, 'video:', hasVideo)
           await conn.pc.setRemoteDescription(new RTCSessionDescription(signal.sdp))
 
           // Apply any pending ICE candidates
@@ -442,6 +525,10 @@ export function useWebRTC(roomId: Id<"rooms"> | null, userName: string) {
 
           log('Creating answer')
           const answer = await conn.pc.createAnswer()
+          // Log what's in the answer SDP
+          const answerHasAudio = answer.sdp?.includes('m=audio') || false
+          const answerHasVideo = answer.sdp?.includes('m=video') || false
+          log('Created answer - audio:', answerHasAudio, 'video:', answerHasVideo)
           await conn.pc.setLocalDescription(answer)
 
           if (conn.pc.localDescription && mountedRef.current && currentRoomIdRef.current) {
@@ -457,6 +544,11 @@ export function useWebRTC(roomId: Id<"rooms"> | null, userName: string) {
       } else if (signal.type === 'answer') {
         if (conn && conn.pc.signalingState === 'have-local-offer') {
           log('Setting remote description from answer')
+          // Log what media is in the answer
+          const sdp = signal.sdp.sdp || ''
+          const hasAudio = sdp.includes('m=audio')
+          const hasVideo = sdp.includes('m=video')
+          log('Answer contains - audio:', hasAudio, 'video:', hasVideo)
           await conn.pc.setRemoteDescription(new RTCSessionDescription(signal.sdp))
 
           // Apply any pending ICE candidates
@@ -624,6 +716,9 @@ export function useWebRTC(roomId: Id<"rooms"> | null, userName: string) {
       iceBatchTimerRef.current.clear()
       iceBatchRef.current.clear()
       makingOfferRef.current.clear()
+      connectionTimeoutRef.current.forEach(timer => clearTimeout(timer))
+      connectionTimeoutRef.current.clear()
+      iceRestartAttemptsRef.current.clear()
     }
   }, [])
 
