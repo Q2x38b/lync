@@ -597,9 +597,7 @@ export function useWebRTC(roomId: Id<"rooms"> | null, userName: string) {
     try {
       // Get screen stream
       const stream = await navigator.mediaDevices.getDisplayMedia({
-        video: {
-          cursor: 'always',
-        },
+        video: true,
         audio: false,
       })
 
