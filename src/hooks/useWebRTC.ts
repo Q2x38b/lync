@@ -22,31 +22,35 @@ function getOrCreatePeerId(): string {
 }
 
 const ICE_SERVERS: RTCIceServer[] = [
-  // Multiple STUN servers for reliability
+  // Multiple STUN servers for reliability - these help with NAT traversal
   { urls: 'stun:stun.l.google.com:19302' },
   { urls: 'stun:stun1.l.google.com:19302' },
   { urls: 'stun:stun2.l.google.com:19302' },
   { urls: 'stun:stun3.l.google.com:19302' },
   { urls: 'stun:stun4.l.google.com:19302' },
-  // OpenRelay TURN servers (free, public)
-  {
-    urls: 'turn:openrelay.metered.ca:80',
-    username: 'openrelayproject',
-    credential: 'openrelayproject',
-  },
-  {
-    urls: 'turn:openrelay.metered.ca:443',
-    username: 'openrelayproject',
-    credential: 'openrelayproject',
-  },
-  {
-    urls: 'turn:openrelay.metered.ca:443?transport=tcp',
-    username: 'openrelayproject',
-    credential: 'openrelayproject',
-  },
-  // Twilio STUN (no TURN, but reliable for gathering)
+  // Additional reliable STUN servers
   { urls: 'stun:global.stun.twilio.com:3478' },
+  { urls: 'stun:stun.cloudflare.com:3478' },
+  // ExpressTURN free TURN servers (community maintained)
+  {
+    urls: 'turn:relay1.expressturn.com:3478',
+    username: 'efGHA4PYZXIRRJ7M',
+    credential: 'K1RUu1DAbkBi8Ycb',
+  },
+  {
+    urls: 'turn:relay1.expressturn.com:3478?transport=tcp',
+    username: 'efGHA4PYZXIRRJ7M',
+    credential: 'K1RUu1DAbkBi8Ycb',
+  },
 ]
+
+// RTCPeerConnection configuration with ICE candidate pool
+const PC_CONFIG: RTCConfiguration = {
+  iceServers: ICE_SERVERS,
+  iceCandidatePoolSize: 10, // Pre-gather candidates for faster connection
+  bundlePolicy: 'max-bundle', // Bundle all media on single transport
+  rtcpMuxPolicy: 'require', // Require RTCP multiplexing
+}
 
 // Connection timeout - if ICE doesn't connect within this time, restart
 const ICE_CONNECTION_TIMEOUT_MS = 15000
@@ -229,7 +233,7 @@ export function useWebRTC(roomId: Id<"rooms"> | null, userName: string) {
     }
 
     log('Creating peer connection to', targetId, 'isInitiator:', isInitiator)
-    const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS })
+    const pc = new RTCPeerConnection(PC_CONFIG)
 
     // Add local tracks BEFORE storing the connection
     if (localStreamRef.current) {
@@ -251,6 +255,10 @@ export function useWebRTC(roomId: Id<"rooms"> | null, userName: string) {
     // Handle ICE candidates - batch them to reduce signal count
     pc.onicecandidate = (event) => {
       if (event.candidate && mountedRef.current && currentRoomIdRef.current) {
+        // Log candidate type for debugging connectivity issues
+        const candidate = event.candidate
+        log('ICE candidate gathered:', candidate.type, candidate.protocol, candidate.address ? `${candidate.address}:${candidate.port}` : '')
+
         // Add to batch
         const batch = iceBatchRef.current.get(targetId) || []
         batch.push(event.candidate.toJSON())
@@ -296,36 +304,63 @@ export function useWebRTC(roomId: Id<"rooms"> | null, userName: string) {
           const currentState = pc.iceConnectionState
           if (currentState === 'checking' || currentState === 'new') {
             const attempts = iceRestartAttemptsRef.current.get(targetId) || 0
-            if (attempts < 3) {
+            if (attempts < 5) { // Increased max attempts
               log('ICE connection timeout, restarting ICE (attempt', attempts + 1, ')')
               iceRestartAttemptsRef.current.set(targetId, attempts + 1)
+              // Create new offer with ICE restart flag
               pc.restartIce()
             } else {
-              log('ICE connection failed after 3 restart attempts')
+              log('ICE connection failed after 5 restart attempts - check network/firewall')
             }
           }
         }, ICE_CONNECTION_TIMEOUT_MS)
         connectionTimeoutRef.current.set(targetId, timeout)
       } else if (state === 'failed') {
         const attempts = iceRestartAttemptsRef.current.get(targetId) || 0
-        if (attempts < 3) {
+        if (attempts < 5) { // Increased max attempts
           log('ICE connection failed, restarting ICE (attempt', attempts + 1, ')')
           iceRestartAttemptsRef.current.set(targetId, attempts + 1)
-          pc.restartIce()
+          // Use createOffer with iceRestart for more aggressive restart
+          const shouldInitiate = peerId > targetId
+          if (shouldInitiate && !makingOfferRef.current.get(targetId)) {
+            makingOfferRef.current.set(targetId, true)
+            pc.createOffer({ iceRestart: true })
+              .then(offer => pc.setLocalDescription(offer))
+              .then(() => {
+                if (pc.localDescription && mountedRef.current && currentRoomIdRef.current) {
+                  log('Sending ICE restart offer to', targetId)
+                  sendSignal({
+                    roomId: currentRoomIdRef.current,
+                    from: peerId,
+                    to: targetId,
+                    signal: JSON.stringify({ type: 'offer', sdp: pc.localDescription }),
+                  }).catch(err => log('Failed to send ICE restart offer:', err))
+                }
+              })
+              .catch(err => log('ICE restart offer error:', err))
+              .finally(() => makingOfferRef.current.set(targetId, false))
+          } else if (!shouldInitiate) {
+            // Non-initiator just restarts ICE and waits for new offer
+            pc.restartIce()
+          }
         } else {
-          log('ICE connection failed permanently after 3 attempts')
+          log('ICE connection failed permanently after 5 attempts - check network/firewall')
         }
       } else if (state === 'connected' || state === 'completed') {
         log('ICE connection established with', targetId)
         iceRestartAttemptsRef.current.delete(targetId)
       } else if (state === 'disconnected') {
-        // Set a short timeout before restart - disconnected can recover
+        // Set a longer timeout before restart - disconnected can recover on its own
         const timeout = setTimeout(() => {
           if (pc.iceConnectionState === 'disconnected') {
-            log('ICE still disconnected, restarting')
-            pc.restartIce()
+            log('ICE still disconnected after 5s, restarting')
+            const attempts = iceRestartAttemptsRef.current.get(targetId) || 0
+            if (attempts < 5) {
+              iceRestartAttemptsRef.current.set(targetId, attempts + 1)
+              pc.restartIce()
+            }
           }
-        }, 3000)
+        }, 5000) // Increased from 3s to 5s
         connectionTimeoutRef.current.set(targetId, timeout)
       }
     }

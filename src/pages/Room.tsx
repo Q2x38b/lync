@@ -888,6 +888,17 @@ function VideoTile({ tile, className = '', compact = false }: VideoTileProps) {
   const videoRef = useRef<HTMLVideoElement>(null)
   const [streamKey, setStreamKey] = useState(0)
   const [hasError, setHasError] = useState(false)
+  const mountedRef = useRef(true)
+  const currentStreamRef = useRef<MediaStream | null>(null)
+  const playAttemptRef = useRef(0)
+
+  // Track component mount state
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+    }
+  }, [])
 
   // Track stream changes and force updates when tracks change
   useEffect(() => {
@@ -915,39 +926,77 @@ function VideoTile({ tile, className = '', compact = false }: VideoTileProps) {
     if (video && tile.stream) {
       console.log('[VideoTile] Setting stream for', tile.name, 'tracks:', tile.stream.getTracks().map(t => `${t.kind}:${t.enabled}`))
 
+      // Track current stream for race condition detection
+      currentStreamRef.current = tile.stream
+      const thisAttempt = ++playAttemptRef.current
+
       // Always set srcObject to ensure tracks are picked up
       video.srcObject = tile.stream
 
       // Reset error state
       setHasError(false)
 
-      // Play video with retry logic
+      // Play video with retry logic and race condition handling
       const playVideo = async () => {
+        // Check if component is still mounted and stream is still current
+        if (!mountedRef.current || currentStreamRef.current !== tile.stream || playAttemptRef.current !== thisAttempt) {
+          return
+        }
+
         try {
           await video.play()
-          console.log('[VideoTile] Video playing for', tile.name)
+          if (mountedRef.current && playAttemptRef.current === thisAttempt) {
+            console.log('[VideoTile] Video playing for', tile.name)
+          }
         } catch (err) {
+          // AbortError means the video was removed or srcObject changed - this is expected during re-renders
+          if (err instanceof Error && err.name === 'AbortError') {
+            console.log('[VideoTile] Play aborted for', tile.name, '(component may have re-rendered)')
+            return
+          }
+
           console.log('[VideoTile] Play failed for', tile.name, err)
+
+          // Check again before retry
+          if (!mountedRef.current || currentStreamRef.current !== tile.stream || playAttemptRef.current !== thisAttempt) {
+            return
+          }
+
           // Try again with muted (browsers allow muted autoplay)
           if (!tile.isLocal) {
             video.muted = true
             try {
               await video.play()
-              console.log('[VideoTile] Video playing muted for', tile.name)
-              // Unmute after a short delay
-              setTimeout(() => {
-                video.muted = false
-              }, 100)
-            } catch {
-              setHasError(true)
+              if (mountedRef.current && playAttemptRef.current === thisAttempt) {
+                console.log('[VideoTile] Video playing muted for', tile.name)
+                // Unmute after a short delay
+                setTimeout(() => {
+                  if (mountedRef.current && videoRef.current) {
+                    videoRef.current.muted = false
+                  }
+                }, 100)
+              }
+            } catch (retryErr) {
+              if (retryErr instanceof Error && retryErr.name === 'AbortError') {
+                return // Expected during re-renders
+              }
+              if (mountedRef.current) {
+                setHasError(true)
+              }
             }
           }
         }
       }
 
-      playVideo()
+      // Small delay to let React finish DOM updates before playing
+      const timeoutId = setTimeout(playVideo, 50)
+
+      return () => {
+        clearTimeout(timeoutId)
+      }
     } else if (video && !tile.stream) {
       video.srcObject = null
+      currentStreamRef.current = null
     }
   }, [tile.stream, tile.name, tile.isLocal, streamKey])
 
@@ -960,15 +1009,14 @@ function VideoTile({ tile, className = '', compact = false }: VideoTileProps) {
 
   return (
     <div className={`relative bg-secondary rounded-xl overflow-hidden ${className}`}>
-      {showVideo ? (
-        <video
-          ref={videoRef}
-          autoPlay
-          playsInline
-          muted={tile.isLocal}
-          className={`w-full h-full object-contain ${shouldMirror ? 'scale-x-[-1]' : ''}`}
-        />
-      ) : (
+      <video
+        ref={videoRef}
+        autoPlay
+        playsInline
+        muted={tile.isLocal}
+        className={`w-full h-full object-contain ${shouldMirror ? 'scale-x-[-1]' : ''} ${showVideo ? '' : 'invisible'}`}
+      />
+      {!showVideo && (
         <div className="absolute inset-0 flex items-center justify-center bg-muted">
           <div
             className={`rounded-full bg-secondary flex items-center justify-center font-medium ${
