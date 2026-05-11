@@ -386,24 +386,24 @@ export function useWebRTC(roomId: Id<"rooms"> | null, userName: string) {
         return
       }
 
-      // Use the stream from the event if available
-      let remoteStream: MediaStream
+      // Build a fresh MediaStream that combines previously-seen tracks with the new one.
+      // We always create a NEW MediaStream reference so React's useEffect deps detect the
+      // change and re-attach srcObject on the <video> element. The HTMLVideoElement does
+      // NOT automatically render tracks added to an already-attached MediaStream, and
+      // WebRTC's track event doesn't fire MediaStream.addtrack, so reusing the same
+      // stream reference would leave the video element stuck showing only the initial track.
+      const sourceTracks = event.streams && event.streams[0]
+        ? event.streams[0].getTracks()
+        : []
+      const previousTracks = conn.stream ? conn.stream.getTracks() : []
+      const trackMap = new Map<string, MediaStreamTrack>()
+      for (const t of previousTracks) trackMap.set(t.id, t)
+      for (const t of sourceTracks) trackMap.set(t.id, t)
+      trackMap.set(event.track.id, event.track)
+      const remoteStream = new MediaStream(Array.from(trackMap.values()))
+      log('Built remote stream with tracks:', remoteStream.getTracks().map(t => t.kind))
 
-      if (event.streams && event.streams[0]) {
-        remoteStream = event.streams[0]
-        log('Using stream from event, tracks:', remoteStream.getTracks().map(t => t.kind))
-      } else if (conn.stream) {
-        // Add track to existing stream if we already have one
-        log('Adding track to existing stream')
-        conn.stream.addTrack(event.track)
-        remoteStream = conn.stream
-      } else {
-        // Create new stream with this track
-        log('Creating new stream for track')
-        remoteStream = new MediaStream([event.track])
-      }
-
-      // Update the connection with the stream reference
+      // Update the connection with the new stream reference
       const updatedConn = { ...conn, stream: remoteStream }
       peersRef.current.set(targetId, updatedConn)
 
