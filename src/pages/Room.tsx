@@ -885,132 +885,44 @@ interface VideoTileProps {
 }
 
 function VideoTile({ tile, className = '', compact = false }: VideoTileProps) {
-  const videoRef = useRef<HTMLVideoElement>(null)
-  const [streamKey, setStreamKey] = useState(0)
-  const [hasError, setHasError] = useState(false)
-  const mountedRef = useRef(true)
-  const currentStreamRef = useRef<MediaStream | null>(null)
-  const playAttemptRef = useRef(0)
-
-  // Track component mount state
-  useEffect(() => {
-    mountedRef.current = true
-    return () => {
-      mountedRef.current = false
+  // Ref callback that attaches the stream to the <video> element the moment it
+  // mounts in the DOM. Using a callback ref (rather than useRef + useEffect)
+  // guarantees attachment happens synchronously when the element appears,
+  // avoiding ordering issues where useEffect might run before the element is
+  // mounted or skip when its deps appear unchanged.
+  const setVideoRef = useCallback((el: HTMLVideoElement | null) => {
+    if (!el) return
+    if (!tile.stream) {
+      el.srcObject = null
+      return
     }
-  }, [])
-
-  // Track stream changes and force updates when tracks change
-  useEffect(() => {
-    if (!tile.stream) return
-
-    const handleTrackChange = () => {
-      console.log('[VideoTile] Track changed for', tile.name)
-      setStreamKey(prev => prev + 1)
-      setHasError(false)
+    if (el.srcObject !== tile.stream) {
+      el.srcObject = tile.stream
     }
-
-    // Listen for track additions
-    tile.stream.addEventListener('addtrack', handleTrackChange)
-    tile.stream.addEventListener('removetrack', handleTrackChange)
-
-    return () => {
-      tile.stream?.removeEventListener('addtrack', handleTrackChange)
-      tile.stream?.removeEventListener('removetrack', handleTrackChange)
-    }
-  }, [tile.stream, tile.name])
-
-  // Attach stream to video element when stream or tracks change
-  useEffect(() => {
-    const video = videoRef.current
-    if (video && tile.stream) {
-      console.log('[VideoTile] Setting stream for', tile.name, 'tracks:', tile.stream.getTracks().map(t => `${t.kind}:${t.enabled}`))
-
-      // Track current stream for race condition detection
-      currentStreamRef.current = tile.stream
-      const thisAttempt = ++playAttemptRef.current
-
-      // Always set srcObject to ensure tracks are picked up
-      video.srcObject = tile.stream
-
-      // Reset error state
-      setHasError(false)
-
-      // Play video with retry logic and race condition handling
-      const playVideo = async () => {
-        // Check if component is still mounted and stream is still current
-        if (!mountedRef.current || currentStreamRef.current !== tile.stream || playAttemptRef.current !== thisAttempt) {
-          return
+    const attempt = el.play()
+    if (attempt && typeof attempt.catch === 'function') {
+      attempt.catch(() => {
+        // Autoplay-with-sound blocked. Retry muted; remote tile only.
+        if (!tile.isLocal) {
+          el.muted = true
+          el.play().then(() => {
+            setTimeout(() => {
+              if (el.isConnected) el.muted = false
+            }, 200)
+          }).catch(() => { /* user gesture required */ })
         }
-
-        try {
-          await video.play()
-          if (mountedRef.current && playAttemptRef.current === thisAttempt) {
-            console.log('[VideoTile] Video playing for', tile.name)
-          }
-        } catch (err) {
-          // AbortError means the video was removed or srcObject changed - this is expected during re-renders
-          if (err instanceof Error && err.name === 'AbortError') {
-            console.log('[VideoTile] Play aborted for', tile.name, '(component may have re-rendered)')
-            return
-          }
-
-          console.log('[VideoTile] Play failed for', tile.name, err)
-
-          // Check again before retry
-          if (!mountedRef.current || currentStreamRef.current !== tile.stream || playAttemptRef.current !== thisAttempt) {
-            return
-          }
-
-          // Try again with muted (browsers allow muted autoplay)
-          if (!tile.isLocal) {
-            video.muted = true
-            try {
-              await video.play()
-              if (mountedRef.current && playAttemptRef.current === thisAttempt) {
-                console.log('[VideoTile] Video playing muted for', tile.name)
-                // Unmute after a short delay
-                setTimeout(() => {
-                  if (mountedRef.current && videoRef.current) {
-                    videoRef.current.muted = false
-                  }
-                }, 100)
-              }
-            } catch (retryErr) {
-              if (retryErr instanceof Error && retryErr.name === 'AbortError') {
-                return // Expected during re-renders
-              }
-              if (mountedRef.current) {
-                setHasError(true)
-              }
-            }
-          }
-        }
-      }
-
-      // Small delay to let React finish DOM updates before playing
-      const timeoutId = setTimeout(playVideo, 50)
-
-      return () => {
-        clearTimeout(timeoutId)
-      }
-    } else if (video && !tile.stream) {
-      video.srcObject = null
-      currentStreamRef.current = null
+      })
     }
-  }, [tile.stream, tile.name, tile.isLocal, streamKey])
+  }, [tile.stream, tile.isLocal])
 
-  // Don't mirror when screen sharing
   const shouldMirror = tile.isLocal && !tile.isScreenSharing
-
-  // Show video if we have a stream with video tracks
-  const hasVideoTrack = tile.stream && tile.stream.getVideoTracks().length > 0
-  const showVideo = hasVideoTrack && !tile.isVideoOff && !hasError
+  const hasVideoTrack = !!tile.stream && tile.stream.getVideoTracks().length > 0
+  const showVideo = hasVideoTrack && !tile.isVideoOff
 
   return (
     <div className={`relative bg-secondary rounded-xl overflow-hidden ${className}`}>
       <video
-        ref={videoRef}
+        ref={setVideoRef}
         autoPlay
         playsInline
         muted={tile.isLocal}
