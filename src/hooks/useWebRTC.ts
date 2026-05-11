@@ -235,14 +235,24 @@ export function useWebRTC(roomId: Id<"rooms"> | null, userName: string) {
     log('Creating peer connection to', targetId, 'isInitiator:', isInitiator)
     const pc = new RTCPeerConnection(PC_CONFIG)
 
-    // Add local tracks BEFORE storing the connection
+    // Always create both audio and video transceivers in sendrecv direction so
+    // the offer/answer always contains m=audio and m=video sections, even if
+    // the local stream is missing one (e.g., camera-denied). Attach local tracks
+    // via replaceTrack instead of addTrack so the transceiver order stays fixed
+    // (audio first, video second) on both peers — Unified Plan matches by order.
+    const audioTransceiver = pc.addTransceiver('audio', { direction: 'sendrecv' })
+    const videoTransceiver = pc.addTransceiver('video', { direction: 'sendrecv' })
+
     if (localStreamRef.current) {
-      const tracks = localStreamRef.current.getTracks()
-      log('Adding', tracks.length, 'local tracks to peer connection:', tracks.map(t => `${t.kind}:${t.enabled}:${t.readyState}`))
-      tracks.forEach(track => {
-        const sender = pc.addTrack(track, localStreamRef.current!)
-        log('Added track', track.kind, 'sender:', sender ? 'success' : 'failed')
-      })
+      const audioTrack = localStreamRef.current.getAudioTracks()[0]
+      const videoTrack = localStreamRef.current.getVideoTracks()[0]
+      log('Local tracks - audio:', !!audioTrack, 'video:', !!videoTrack)
+      if (audioTrack) {
+        audioTransceiver.sender.replaceTrack(audioTrack).catch(err => log('replaceTrack audio failed:', err))
+      }
+      if (videoTrack) {
+        videoTransceiver.sender.replaceTrack(videoTrack).catch(err => log('replaceTrack video failed:', err))
+      }
     } else {
       log('Warning: No local stream available when creating peer connection')
     }
@@ -471,10 +481,7 @@ export function useWebRTC(roomId: Id<"rooms"> | null, userName: string) {
       const senders = pc.getSenders()
       log('Peer connection has', senders.length, 'senders:', senders.map(s => s.track?.kind || 'null'))
 
-      pc.createOffer({
-        offerToReceiveAudio: true,
-        offerToReceiveVideo: true,
-      })
+      pc.createOffer()
         .then(offer => {
           // Log what's in the offer SDP
           const hasAudio = offer.sdp?.includes('m=audio') || false
