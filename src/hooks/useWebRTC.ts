@@ -22,23 +22,48 @@ function getOrCreatePeerId(): string {
 }
 
 const ICE_SERVERS: RTCIceServer[] = [
-  // Multiple STUN servers for reliability - these help with NAT traversal
+  // STUN servers - help peers discover their public IP
   { urls: 'stun:stun.l.google.com:19302' },
   { urls: 'stun:stun1.l.google.com:19302' },
   { urls: 'stun:stun2.l.google.com:19302' },
   { urls: 'stun:stun3.l.google.com:19302' },
   { urls: 'stun:stun4.l.google.com:19302' },
-  // Additional reliable STUN servers
   { urls: 'stun:global.stun.twilio.com:3478' },
   { urls: 'stun:stun.cloudflare.com:3478' },
-  // ExpressTURN free TURN servers (community maintained)
+
+  // TURN servers - relay traffic when STUN can't punch through NAT.
+  // Required for cross-network calls behind symmetric NATs or
+  // restrictive firewalls. Port 443 + TCP transports come first so
+  // they work even on networks that block UDP / non-standard ports.
+  // Metered OpenRelay (public free TURN):
   {
-    urls: 'turn:relay1.expressturn.com:3478',
+    urls: 'turn:openrelay.metered.ca:443?transport=tcp',
+    username: 'openrelayproject',
+    credential: 'openrelayproject',
+  },
+  {
+    urls: 'turn:openrelay.metered.ca:443',
+    username: 'openrelayproject',
+    credential: 'openrelayproject',
+  },
+  {
+    urls: 'turn:openrelay.metered.ca:80?transport=tcp',
+    username: 'openrelayproject',
+    credential: 'openrelayproject',
+  },
+  {
+    urls: 'turn:openrelay.metered.ca:80',
+    username: 'openrelayproject',
+    credential: 'openrelayproject',
+  },
+  // ExpressTURN (kept as a fallback in case OpenRelay is rate-limited):
+  {
+    urls: 'turn:relay1.expressturn.com:3478?transport=tcp',
     username: 'efGHA4PYZXIRRJ7M',
     credential: 'K1RUu1DAbkBi8Ycb',
   },
   {
-    urls: 'turn:relay1.expressturn.com:3478?transport=tcp',
+    urls: 'turn:relay1.expressturn.com:3478',
     username: 'efGHA4PYZXIRRJ7M',
     credential: 'K1RUu1DAbkBi8Ycb',
   },

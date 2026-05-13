@@ -150,7 +150,10 @@ export function Home() {
         {isDark ? <Sun size={20} /> : <Moon size={20} />}
       </button>
 
-      <div className="w-full max-w-xs border border-border/60 rounded-3xl px-6 py-10">
+      <div className={mode === 'initial'
+        ? "w-full max-w-xs border border-border/60 rounded-3xl px-6 py-10"
+        : "w-full max-w-md"}>
+
         {/* Header */}
         <div className="text-center mb-12">
           <div className="flex items-end justify-center gap-3 mb-2">

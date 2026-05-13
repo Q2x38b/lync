@@ -767,10 +767,11 @@ export function Room() {
           <div className={cn("h-full flex flex-col")} style={{ padding: 16 }}>
             {/* Header */}
             <div className="flex items-center" style={{ height: 40, marginBottom: 12, gap: 8 }}>
+              <div className="flex items-center gap-1 bg-secondary/50 rounded-full p-1">
               <button
                 onClick={() => setSidebarOpen(!sidebarOpen)}
                 className={cn(
-                  "rounded-lg hover:bg-accent active:scale-95",
+                  "rounded-full hover:bg-accent active:scale-95",
                   "transition-colors duration-150 text-foreground"
                 )}
                 style={{ padding: 8 }}
@@ -787,7 +788,7 @@ export function Room() {
               <button
                 onClick={handleThemeToggle}
                 className={cn(
-                  "rounded-lg hover:bg-accent active:scale-95",
+                  "rounded-full hover:bg-accent active:scale-95",
                   "transition-colors duration-150 text-foreground"
                 )}
                 style={{ padding: 8 }}
@@ -815,7 +816,7 @@ export function Room() {
               <button
                 onClick={cycleLayout}
                 className={cn(
-                  "rounded-lg hover:bg-accent active:scale-95",
+                  "rounded-full hover:bg-accent active:scale-95",
                   "transition-colors duration-150 text-foreground"
                 )}
                 style={{ padding: 8 }}
@@ -830,7 +831,7 @@ export function Room() {
                   if (bgUrls.length === 0) handleFetchBackgrounds()
                 }}
                 className={cn(
-                  "rounded-lg hover:bg-accent active:scale-95",
+                  "rounded-full hover:bg-accent active:scale-95",
                   "transition-colors duration-150 text-foreground"
                 )}
                 style={{ padding: 8 }}
@@ -838,6 +839,7 @@ export function Room() {
               >
                 <ImageIcon size={20} />
               </button>
+              </div>
 
               <div className="flex-1" />
             </div>
