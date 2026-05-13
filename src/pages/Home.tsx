@@ -152,7 +152,7 @@ export function Home() {
 
       <div className="w-full max-w-xs border border-border/60 rounded-3xl px-6 py-10">
         {/* Header */}
-        <div className="text-center mb-8">
+        <div className="text-center mb-12">
           <div className="flex items-end justify-center gap-3 mb-2">
             <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 18 18" className="text-foreground">
               <path d="M17.386,5.019c-.385-.227-.848-.234-1.238-.019l-2.148,1.181v5.637l2.147,1.181c.19,.105,.397,.157,.604,.157,.219,0,.438-.059,.635-.175,.385-.228,.614-.63,.614-1.077V6.096c0-.447-.229-.849-.614-1.077Z" fill="currentColor" />
@@ -170,20 +170,20 @@ export function Home() {
 
         {/* Initial options */}
         {mode === 'initial' && (
-          <div className="space-y-3">
+          <div className="space-y-4">
             <button
               onClick={() => setMode('create')}
-              className="w-full py-4 bg-foreground text-background rounded-full font-medium flex items-center justify-center gap-2 hover:opacity-90 transition-opacity"
+              className="w-full py-2.5 text-sm bg-foreground text-background rounded-full font-medium flex items-center justify-center gap-2 hover:opacity-90 transition-opacity"
             >
-              <CameraIcon size={18} />
+              <CameraIcon size={16} />
               Create Room
             </button>
 
             <button
               onClick={() => setMode('join')}
-              className="w-full py-4 bg-secondary hover:bg-accent rounded-full font-medium flex items-center justify-center gap-2 transition-colors"
+              className="w-full py-2.5 text-sm bg-secondary hover:bg-accent rounded-full font-medium flex items-center justify-center gap-2 transition-colors"
             >
-              <PeopleIcon size={18} />
+              <PeopleIcon size={16} />
               Join Room
             </button>
           </div>
