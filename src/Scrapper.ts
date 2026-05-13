@@ -1,14 +1,8 @@
 // Unsplash background-image scraper.
-//
-// Run from the terminal:
-//     npx tsx src/Scrapper.ts mountains
-//
 // Fetches image URLs from Unsplash and saves them to src/backgrounds.json
 // so the React app can use them as video-call layout backgrounds.
 //
-// The old version used cheerio to parse Unsplash's HTML. That didn't work
-// because Unsplash is a JavaScript SPA -- the raw HTML is empty. This
-// version calls Unsplash's internal JSON endpoint (/napi/search/photos)
+// Calls Unsplash's internal JSON endpoint (/napi/search/photos)
 // instead, which returns the photos directly.
 
 // axios: HTTP client used to send the GET request.

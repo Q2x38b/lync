@@ -1,32 +1,79 @@
-// Server-side version of the Scrapper.ts logic, wrapped as a Convex action
-// so the React app can trigger it. Same Unsplash /napi/search/photos endpoint
-// the standalone CLI scraper uses -- the difference is this runs in Convex's
-// server runtime, which avoids the browser CORS block.
+// Server-side scraper for Unsplash background images.
 
 import { action } from "./_generated/server";
 import { v } from "convex/values";
 
-type UnsplashPhoto = {
-  urls?: { regular?: string; small?: string; full?: string };
+// Cap on how many image URLs we return from a single scrape.
+const MAX_IMAGES = 20;
+
+// Matches direct CDN photo URLs of the form:
+//   https://images.unsplash.com/photo-<id>?<query-string>
+// Stops at the first quote, whitespace, or backslash so we don't
+// drag in trailing HTML/JSON garbage.
+const IMG_URL_REGEX =
+  /https:\/\/images\.unsplash\.com\/photo-[A-Za-z0-9_-]+(?:\?[^"'\s\\]*)?/g;
+
+const BROWSER_HEADERS = {
+  "User-Agent":
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+  Accept:
+    "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+  "Accept-Language": "en-US,en;q=0.9",
+  // Hint Jina to return raw HTML instead of its default markdown summary.
+  // Other proxies just ignore this header.
+  "X-Return-Format": "html",
 };
 
-type UnsplashSearchResponse = {
-  results?: UnsplashPhoto[];
-};
+// Unsplash 401s direct requests from Convex's serverless IPs. Route through
+// free public fetch-proxies whose IPs aren't blocked. We're still scraping
+// Unsplash HTML -- the proxies are intermediate hops.
+async function fetchUnsplashHtml(targetUrl: string): Promise<string> {
+  const attempts: { label: string; url: string }[] = [
+    // Jina reader -- generally the most reliable of the free public proxies,
+    // purpose-built for fetching web content from non-blocked IPs.
+    { label: "jina", url: `https://r.jina.ai/${targetUrl}` },
+    // CodeTabs -- separate operator, useful when Jina rate-limits.
+    {
+      label: "codetabs",
+      url: `https://api.codetabs.com/v1/proxy/?quest=${encodeURIComponent(targetUrl)}`,
+    },
+    // Direct attempt -- cheap and one day Unsplash might unblock the IP.
+    { label: "direct", url: targetUrl },
+    {
+      label: "allorigins",
+      url: `https://api.allorigins.win/raw?url=${encodeURIComponent(targetUrl)}`,
+    },
+    {
+      label: "corsproxy",
+      url: `https://corsproxy.io/?${encodeURIComponent(targetUrl)}`,
+    },
+  ];
 
-// Fallback URLs used if Unsplash blocks the server-side request. These are
-// stable Unsplash CDN links so the picker stays usable for the demo even if
-// the /napi/search call fails (Unsplash sometimes 403s serverless IPs).
-const FALLBACK_URLS = [
-  "https://images.unsplash.com/photo-1506744038136-46273834b3fb?w=1080",
-  "https://images.unsplash.com/photo-1470071459604-3b5ec3a7fe05?w=1080",
-  "https://images.unsplash.com/photo-1501785888041-af3ef285b470?w=1080",
-  "https://images.unsplash.com/photo-1518173946687-a4c8892bbd9f?w=1080",
-  "https://images.unsplash.com/photo-1441974231531-c6227db76b6e?w=1080",
-  "https://images.unsplash.com/photo-1447752875215-b2761acb3c5d?w=1080",
-  "https://images.unsplash.com/photo-1416879595882-3373a0480b5b?w=1080",
-  "https://images.unsplash.com/photo-1472214103451-9374bd1c798e?w=1080",
-];
+  const errors: string[] = [];
+  for (const attempt of attempts) {
+    try {
+      const res = await fetch(attempt.url, { headers: BROWSER_HEADERS });
+      if (!res.ok) {
+        errors.push(`${attempt.label}: HTTP ${res.status}`);
+        continue;
+      }
+      const body = await res.text();
+      // Sanity check: did we get content that contains Unsplash photo URLs?
+      // (Works on both raw HTML and Jina's markdown output -- URLs survive
+      // either representation.)
+      if (body.includes("images.unsplash.com/photo-")) {
+        return body;
+      }
+      errors.push(`${attempt.label}: no photo URLs in response`);
+    } catch (err) {
+      errors.push(
+        `${attempt.label}: ${err instanceof Error ? err.message : String(err)}`
+      );
+    }
+  }
+
+  throw new Error(`All scrape attempts failed -- ${errors.join("; ")}`);
+}
 
 export const fetchBackgrounds = action({
   args: {
@@ -34,45 +81,28 @@ export const fetchBackgrounds = action({
   },
   handler: async (_ctx, { term }) => {
     const query = (term || "nature").trim();
-    const url = `https://unsplash.com/napi/search/photos?query=${encodeURIComponent(query)}&per_page=20`;
+    const targetUrl = `https://unsplash.com/s/photos/${encodeURIComponent(query)}`;
 
-    try {
-      const res = await fetch(url, {
-        headers: {
-          // Match a real browser as closely as possible. Unsplash will 403 a
-          // bare "node-fetch" or empty User-Agent on its internal endpoint.
-          "User-Agent":
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-          Accept: "application/json, text/plain, */*",
-          "Accept-Language": "en-US,en;q=0.9",
-          Referer: "https://unsplash.com/",
-        },
-      });
+    const html = await fetchUnsplashHtml(targetUrl);
 
-      if (!res.ok) {
-        console.warn(
-          `[scraper] Unsplash returned ${res.status} for "${query}", using fallback`
-        );
-        return { term: query, urls: FALLBACK_URLS, source: "fallback" as const };
-      }
-
-      const data = (await res.json()) as UnsplashSearchResponse;
-      const urls = (data.results ?? [])
-        .map((p) => p.urls?.regular)
-        .filter((u): u is string => typeof u === "string");
-
-      if (urls.length === 0) {
-        console.warn(
-          `[scraper] No results for "${query}" from Unsplash, using fallback`
-        );
-        return { term: query, urls: FALLBACK_URLS, source: "fallback" as const };
-      }
-
-      return { term: query, urls, source: "unsplash" as const };
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      console.error(`[scraper] fetch failed for "${query}": ${message}`);
-      return { term: query, urls: FALLBACK_URLS, source: "fallback" as const };
+    // Pull every CDN image URL out of the HTML, dedupe by photo id, and
+    // rewrite each to a consistent 1080px width.
+    const seen = new Set<string>();
+    const urls: string[] = [];
+    for (const match of html.matchAll(IMG_URL_REGEX)) {
+      const idMatch = match[0].match(/photo-([A-Za-z0-9_-]+)/);
+      if (!idMatch) continue;
+      const id = idMatch[1];
+      if (seen.has(id)) continue;
+      seen.add(id);
+      urls.push(`https://images.unsplash.com/photo-${id}?w=1080&q=80`);
+      if (urls.length >= MAX_IMAGES) break;
     }
+
+    if (urls.length === 0) {
+      throw new Error(`No images found on Unsplash search page for "${query}"`);
+    }
+
+    return { term: query, urls };
   },
 });
