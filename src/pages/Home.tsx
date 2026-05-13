@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useMutation, useQuery } from 'convex/react'
 import { api } from '../../convex/_generated/api'
-import { Sun, Moon, Lock, Hash, ArrowRight, Mic, MicOff, Video, VideoOff, MessageSquare, Monitor, Settings, KeyRound, Eye, EyeOff } from 'lucide-react'
+import { Sun, Moon, Lock, Hash, Mic, MicOff, Video, VideoOff, MessageSquare, Monitor, Settings, KeyRound, Eye, EyeOff } from 'lucide-react'
 
 // Custom icons
 const CameraIcon = ({ size = 20 }: { size?: number }) => (
@@ -150,7 +150,7 @@ export function Home() {
         {isDark ? <Sun size={20} /> : <Moon size={20} />}
       </button>
 
-      <div className="w-full max-w-md border border-border/60 rounded-3xl p-8">
+      <div className="w-full max-w-xs border border-border/60 rounded-3xl px-6 py-10">
         {/* Header */}
         <div className="text-center mb-8">
           <div className="flex items-end justify-center gap-3 mb-2">
@@ -173,34 +173,18 @@ export function Home() {
           <div className="space-y-3">
             <button
               onClick={() => setMode('create')}
-              className="w-full p-4 bg-secondary hover:bg-accent rounded-lg flex items-center justify-between transition-colors group"
+              className="w-full py-4 bg-foreground text-background rounded-full font-medium flex items-center justify-center gap-2 hover:opacity-90 transition-opacity"
             >
-              <div className="flex items-center gap-3">
-                <div className="p-2 bg-background rounded-lg">
-                  <CameraIcon size={20} />
-                </div>
-                <div className="text-left">
-                  <div className="font-medium">Create Room</div>
-                  <div className="text-sm text-muted-foreground">Start a new video call</div>
-                </div>
-              </div>
-              <ArrowRight size={20} className="text-muted-foreground group-hover:translate-x-1 transition-transform" />
+              <CameraIcon size={18} />
+              Create Room
             </button>
 
             <button
               onClick={() => setMode('join')}
-              className="w-full p-4 bg-secondary hover:bg-accent rounded-lg flex items-center justify-between transition-colors group"
+              className="w-full py-4 bg-secondary hover:bg-accent rounded-full font-medium flex items-center justify-center gap-2 transition-colors"
             >
-              <div className="flex items-center gap-3">
-                <div className="p-2 bg-background rounded-lg">
-                  <PeopleIcon size={20} />
-                </div>
-                <div className="text-left">
-                  <div className="font-medium">Join Room</div>
-                  <div className="text-sm text-muted-foreground">Enter a room code</div>
-                </div>
-              </div>
-              <ArrowRight size={20} className="text-muted-foreground group-hover:translate-x-1 transition-transform" />
+              <PeopleIcon size={18} />
+              Join Room
             </button>
           </div>
         )}
