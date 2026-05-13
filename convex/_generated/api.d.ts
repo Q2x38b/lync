@@ -10,6 +10,7 @@
 
 import type * as messages from "../messages.js";
 import type * as rooms from "../rooms.js";
+import type * as scraper from "../scraper.js";
 import type * as signals from "../signals.js";
 
 import type {
@@ -21,6 +22,7 @@ import type {
 declare const fullApi: ApiFromModules<{
   messages: typeof messages;
   rooms: typeof rooms;
+  scraper: typeof scraper;
   signals: typeof signals;
 }>;
 

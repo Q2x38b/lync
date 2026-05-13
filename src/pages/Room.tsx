@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from "react"
 import { useParams, useNavigate } from 'react-router-dom'
-import { useQuery, useMutation } from 'convex/react'
+import { useQuery, useMutation, useAction } from 'convex/react'
 import { api } from '../../convex/_generated/api'
 import { useWebRTC } from '../hooks/useWebRTC'
 import { useFavicon } from '../hooks/useFavicon'
@@ -80,6 +80,14 @@ const ScreenShareOffIcon = ({ size = 20 }: { size?: number }) => (
   </svg>
 )
 
+const ImageIcon = ({ size = 20 }: { size?: number }) => (
+  <svg xmlns="http://www.w3.org/2000/svg" width={size} height={size} viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <rect x="3" y="3" width="14" height="14" rx="2" ry="2" />
+    <circle cx="7.5" cy="7.5" r="1.25" fill="currentColor" stroke="none" />
+    <path d="M17 13l-3.5-3.5L7 16" />
+  </svg>
+)
+
 type LayoutMode = 'grid' | 'spotlight' | 'sidebar'
 
 export function Room() {
@@ -105,6 +113,40 @@ export function Room() {
   const [spotlightId, setSpotlightId] = useState<string | null>(null)
   const [showLeaveModal, setShowLeaveModal] = useState(false)
   const [hasSeenRoom, setHasSeenRoom] = useState(false)
+
+  // Background-picker state (powered by the scraper action)
+  const [showBgPicker, setShowBgPicker] = useState(false)
+  const [bgSearchTerm, setBgSearchTerm] = useState('nature')
+  const [bgUrls, setBgUrls] = useState<string[]>([])
+  const [bgLoading, setBgLoading] = useState(false)
+  const [bgError, setBgError] = useState<string | null>(null)
+  const [backgroundUrl, setBackgroundUrl] = useState<string | null>(
+    () => localStorage.getItem('callBackgroundUrl')
+  )
+  const fetchBackgrounds = useAction(api.scraper.fetchBackgrounds)
+
+  const handleFetchBackgrounds = async () => {
+    setBgLoading(true)
+    setBgError(null)
+    try {
+      const result = await fetchBackgrounds({ term: bgSearchTerm })
+      setBgUrls(result.urls)
+    } catch (err) {
+      setBgError(err instanceof Error ? err.message : 'Failed to fetch')
+    } finally {
+      setBgLoading(false)
+    }
+  }
+
+  const handlePickBackground = (url: string | null) => {
+    setBackgroundUrl(url)
+    if (url) {
+      localStorage.setItem('callBackgroundUrl', url)
+    } else {
+      localStorage.removeItem('callBackgroundUrl')
+    }
+    setShowBgPicker(false)
+  }
 
   // Join prompt state for direct URL navigation
   const [showJoinPrompt, setShowJoinPrompt] = useState(false)
@@ -446,6 +488,102 @@ export function Room() {
 
   return (
     <div className="h-screen w-full bg-background flex overflow-hidden">
+      {/* Background picker modal */}
+      <AnimatePresence>
+        {showBgPicker && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4"
+            onClick={() => setShowBgPicker(false)}
+          >
+            <motion.div
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.95, opacity: 0 }}
+              onClick={(e) => e.stopPropagation()}
+              className="bg-card border border-border rounded-2xl p-6 max-w-2xl w-full shadow-xl max-h-[80vh] flex flex-col"
+            >
+              <div className="flex items-center gap-3 mb-4">
+                <h2 className="text-lg font-medium">Pick a background</h2>
+                <button
+                  onClick={() => setShowBgPicker(false)}
+                  className="ml-auto p-1 hover:bg-accent rounded-lg transition-colors"
+                >
+                  <X size={20} />
+                </button>
+              </div>
+
+              <div className="flex gap-2 mb-4">
+                <input
+                  type="text"
+                  value={bgSearchTerm}
+                  onChange={(e) => setBgSearchTerm(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') handleFetchBackgrounds()
+                  }}
+                  placeholder="Search Unsplash (e.g. mountains, ocean)"
+                  className="flex-1 px-3 py-2 bg-background border border-border rounded-lg focus:outline-none focus:ring-2 focus:ring-foreground/20"
+                />
+                <button
+                  onClick={handleFetchBackgrounds}
+                  disabled={bgLoading || !bgSearchTerm.trim()}
+                  className="px-4 py-2 bg-foreground text-background rounded-lg font-medium hover:opacity-90 transition-opacity disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {bgLoading ? 'Loading…' : 'Search'}
+                </button>
+              </div>
+
+              {bgError && (
+                <p className="text-sm text-red-500 mb-3">{bgError}</p>
+              )}
+
+              <div className="flex-1 overflow-y-auto">
+                {bgLoading && bgUrls.length === 0 ? (
+                  <p className="text-muted-foreground text-sm">Fetching backgrounds…</p>
+                ) : bgUrls.length === 0 ? (
+                  <p className="text-muted-foreground text-sm">
+                    Search a term above to load backgrounds from Unsplash.
+                  </p>
+                ) : (
+                  <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
+                    {bgUrls.map((url) => (
+                      <button
+                        key={url}
+                        onClick={() => handlePickBackground(url)}
+                        className={cn(
+                          "aspect-video rounded-lg overflow-hidden border-2 transition-colors",
+                          backgroundUrl === url
+                            ? "border-foreground"
+                            : "border-transparent hover:border-muted-foreground"
+                        )}
+                      >
+                        <img
+                          src={url}
+                          alt=""
+                          className="w-full h-full object-cover"
+                          loading="lazy"
+                        />
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {backgroundUrl && (
+                <button
+                  onClick={() => handlePickBackground(null)}
+                  className="mt-4 w-full py-2 bg-secondary text-foreground rounded-lg font-medium hover:bg-accent transition-colors"
+                >
+                  Clear background
+                </button>
+              )}
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       {/* Leave confirmation modal for host */}
       <AnimatePresence>
         {showLeaveModal && (
@@ -607,10 +745,19 @@ export function Room() {
         {/* Main rounded container - Video Grid */}
         <div
           className={cn(
-            "bg-card rounded-2xl border border-border overflow-hidden",
+            "bg-card rounded-2xl border border-border overflow-hidden relative",
             isMobile ? "min-h-0" : "flex-1"
           )}
-          style={isMobile ? { flex: 1 } : undefined}
+          style={{
+            ...(isMobile ? { flex: 1 } : {}),
+            ...(backgroundUrl
+              ? {
+                  backgroundImage: `url(${backgroundUrl})`,
+                  backgroundSize: 'cover',
+                  backgroundPosition: 'center',
+                }
+              : {}),
+          }}
         >
           <div className={cn("h-full flex flex-col")} style={{ padding: 16 }}>
             {/* Header */}
@@ -670,6 +817,21 @@ export function Room() {
                 title={`Layout: ${layoutMode}`}
               >
                 <GridIcon size={20} />
+              </button>
+
+              <button
+                onClick={() => {
+                  setShowBgPicker(true)
+                  if (bgUrls.length === 0) handleFetchBackgrounds()
+                }}
+                className={cn(
+                  "rounded-lg hover:bg-accent active:scale-95",
+                  "transition-colors duration-150 text-foreground"
+                )}
+                style={{ padding: 8 }}
+                title="Change background"
+              >
+                <ImageIcon size={20} />
               </button>
 
               <div className="flex-1" />
