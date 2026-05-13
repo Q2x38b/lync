@@ -120,6 +120,7 @@ export function Room() {
   const [bgUrls, setBgUrls] = useState<string[]>([])
   const [bgLoading, setBgLoading] = useState(false)
   const [bgError, setBgError] = useState<string | null>(null)
+  const [bgSearched, setBgSearched] = useState(false)
   const [backgroundUrl, setBackgroundUrl] = useState<string | null>(
     () => localStorage.getItem('callBackgroundUrl')
   )
@@ -131,8 +132,10 @@ export function Room() {
     try {
       const result = await fetchBackgrounds({ term: bgSearchTerm })
       setBgUrls(result.urls)
+      setBgSearched(true)
     } catch (err) {
       setBgError(err instanceof Error ? err.message : 'Failed to fetch')
+      setBgSearched(true)
     } finally {
       setBgLoading(false)
     }
@@ -544,7 +547,9 @@ export function Room() {
                   <p className="text-muted-foreground text-sm">Fetching backgrounds…</p>
                 ) : bgUrls.length === 0 ? (
                   <p className="text-muted-foreground text-sm">
-                    Search a term above to load backgrounds from Unsplash.
+                    {bgSearched
+                      ? `No images found for "${bgSearchTerm}". Try a different term.`
+                      : 'Search a term above to load backgrounds.'}
                   </p>
                 ) : (
                   <div className="grid grid-cols-2 md:grid-cols-3 gap-2">

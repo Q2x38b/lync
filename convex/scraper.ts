@@ -19,28 +19,18 @@ const UA = "lync-scraper/1.0 (school project; contact via github.com/Q2x38b/lync
 // string) or end-of-string -- Wikimedia thumb URLs append utm_* params.
 const PHOTO_EXT = /\.(jpe?g|png|webp)(\?|$)/i;
 
-type WikimediaPage = {
-  title?: string;
-  imageinfo?: Array<{
-    thumburl?: string;
-    url?: string;
-  }>;
-};
-
-type WikimediaResponse = {
-  query?: {
-    pages?: Record<string, WikimediaPage>;
-  };
-};
-
 export const fetchBackgrounds = action({
   args: {
     term: v.string(),
   },
   handler: async (_ctx, { term }) => {
-    const query = (term || "nature").trim();
+    // Use the user's term, or "nature" if they didn't type anything.
+    let query = term.trim();
+    if (query === "") {
+      query = "nature";
+    }
 
-    // Build the API URL. Walkthrough of params:
+    // Build the Wikimedia API URL piece by piece.
     //   action=query              -- standard MediaWiki query
     //   generator=search          -- use a search as the list of pages
     //   gsrsearch=<term>          -- the search term
@@ -50,19 +40,19 @@ export const fetchBackgrounds = action({
     //   iiprop=url                -- specifically include the URL fields
     //   iiurlwidth=1080           -- pre-resize thumburl to 1080px wide
     //   format=json               -- get JSON back instead of XML
-    const params = new URLSearchParams({
-      action: "query",
-      format: "json",
-      generator: "search",
-      gsrsearch: query,
-      gsrnamespace: "6",
-      gsrlimit: String(MAX_IMAGES),
-      prop: "imageinfo",
-      iiprop: "url",
-      iiurlwidth: "1080",
-    });
-    const url = `https://commons.wikimedia.org/w/api.php?${params.toString()}`;
+    const url =
+      "https://commons.wikimedia.org/w/api.php" +
+      "?action=query" +
+      "&format=json" +
+      "&generator=search" +
+      "&gsrsearch=" + encodeURIComponent(query) +
+      "&gsrnamespace=6" +
+      "&gsrlimit=" + MAX_IMAGES +
+      "&prop=imageinfo" +
+      "&iiprop=url" +
+      "&iiurlwidth=1080";
 
+    // Send the GET request to Wikimedia.
     const res = await fetch(url, {
       headers: {
         "User-Agent": UA,
@@ -71,24 +61,35 @@ export const fetchBackgrounds = action({
     });
 
     if (!res.ok) {
-      throw new Error(`Wikimedia returned ${res.status} for "${query}"`);
+      throw new Error("Wikimedia returned " + res.status + " for \"" + query + "\"");
     }
 
-    const data = (await res.json()) as WikimediaResponse;
-    const pages = data.query?.pages ?? {};
+    // Parse the response body into a plain object.
+    const data: any = await res.json();
 
+    // The response shape is roughly:
+    //   { query: { pages: { "12345": { imageinfo: [{ thumburl, url }] } } } }
+    // Grab the pages object, or an empty {} if it's missing.
+    const pages = (data.query && data.query.pages) ? data.query.pages : {};
+
+    // Walk through each page and collect usable photo URLs.
     const urls: string[] = [];
-    for (const page of Object.values(pages)) {
-      const info = page.imageinfo?.[0];
-      const candidate = info?.thumburl ?? info?.url;
+    for (const pageId in pages) {
+      const page = pages[pageId];
+
+      // imageinfo is an array; we want the first entry's URL.
+      const info = page.imageinfo ? page.imageinfo[0] : null;
+      if (!info) continue;
+
+      // Prefer the resized thumbnail. Fall back to the full-size URL.
+      const candidate = info.thumburl || info.url;
       if (!candidate) continue;
+
+      // Skip anything that isn't a real photo (SVG, PDF, etc.).
       if (!PHOTO_EXT.test(candidate)) continue;
+
       urls.push(candidate);
       if (urls.length >= MAX_IMAGES) break;
-    }
-
-    if (urls.length === 0) {
-      throw new Error(`No images found on Wikimedia for "${query}"`);
     }
 
     return { term: query, urls };

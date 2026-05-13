@@ -140,7 +140,7 @@ export function Home() {
   }
 
   return (
-    <div className="h-dvh bg-background flex flex-col items-center justify-center p-4 overflow-hidden">
+    <div className="h-dvh bg-muted flex flex-col items-center justify-center p-4 overflow-hidden">
       {/* Theme toggle */}
       <button
         onClick={toggleTheme}
@@ -150,7 +150,7 @@ export function Home() {
         {isDark ? <Sun size={20} /> : <Moon size={20} />}
       </button>
 
-      <div className="w-full max-w-md">
+      <div className="w-full max-w-md bg-card border border-border rounded-3xl shadow-sm p-8">
         {/* Header */}
         <div className="text-center mb-8">
           <div className="flex items-end justify-center gap-3 mb-2">
