@@ -21,8 +21,20 @@ function getOrCreatePeerId(): string {
   return id
 }
 
-const ICE_SERVERS: RTCIceServer[] = [
-  // STUN servers - help peers discover their public IP
+// TURN credentials are read from Vite env vars so they can be rotated
+// without code changes. Set these in .env.local for local dev AND in
+// your hosting platform's env-var settings for production:
+//
+//   VITE_TURN_HOST=your-host.metered.live
+//   VITE_TURN_USERNAME=...
+//   VITE_TURN_CREDENTIAL=...
+//
+// Get a free account at https://www.metered.ca/ -- 50GB/month free.
+const TURN_HOST = import.meta.env.VITE_TURN_HOST as string | undefined
+const TURN_USERNAME = import.meta.env.VITE_TURN_USERNAME as string | undefined
+const TURN_CREDENTIAL = import.meta.env.VITE_TURN_CREDENTIAL as string | undefined
+
+const STUN_SERVERS: RTCIceServer[] = [
   { urls: 'stun:stun.l.google.com:19302' },
   { urls: 'stun:stun1.l.google.com:19302' },
   { urls: 'stun:stun2.l.google.com:19302' },
@@ -30,44 +42,36 @@ const ICE_SERVERS: RTCIceServer[] = [
   { urls: 'stun:stun4.l.google.com:19302' },
   { urls: 'stun:global.stun.twilio.com:3478' },
   { urls: 'stun:stun.cloudflare.com:3478' },
-
-  // TURN servers - relay traffic when STUN can't punch through NAT.
-  // Required for cross-network calls behind symmetric NATs or
-  // restrictive firewalls. Port 443 + TCP transports come first so
-  // they work even on networks that block UDP / non-standard ports.
-  // Metered OpenRelay (public free TURN):
-  {
-    urls: 'turn:openrelay.metered.ca:443?transport=tcp',
-    username: 'openrelayproject',
-    credential: 'openrelayproject',
-  },
-  {
-    urls: 'turn:openrelay.metered.ca:443',
-    username: 'openrelayproject',
-    credential: 'openrelayproject',
-  },
-  {
-    urls: 'turn:openrelay.metered.ca:80?transport=tcp',
-    username: 'openrelayproject',
-    credential: 'openrelayproject',
-  },
-  {
-    urls: 'turn:openrelay.metered.ca:80',
-    username: 'openrelayproject',
-    credential: 'openrelayproject',
-  },
-  // ExpressTURN (kept as a fallback in case OpenRelay is rate-limited):
-  {
-    urls: 'turn:relay1.expressturn.com:3478?transport=tcp',
-    username: 'efGHA4PYZXIRRJ7M',
-    credential: 'K1RUu1DAbkBi8Ycb',
-  },
-  {
-    urls: 'turn:relay1.expressturn.com:3478',
-    username: 'efGHA4PYZXIRRJ7M',
-    credential: 'K1RUu1DAbkBi8Ycb',
-  },
 ]
+
+// Build a list of TURN URLs covering both transports and the common
+// firewall-friendly ports. Port 443/TCP is the most likely to succeed
+// on restrictive networks (school WiFi, corporate, etc.) because the
+// traffic looks like ordinary HTTPS.
+function buildTurnServers(host: string, username: string, credential: string): RTCIceServer[] {
+  return [
+    { urls: `turn:${host}:443?transport=tcp`, username, credential },
+    { urls: `turns:${host}:443?transport=tcp`, username, credential },
+    { urls: `turn:${host}:443`, username, credential },
+    { urls: `turn:${host}:80?transport=tcp`, username, credential },
+    { urls: `turn:${host}:80`, username, credential },
+  ]
+}
+
+const TURN_SERVERS: RTCIceServer[] =
+  TURN_HOST && TURN_USERNAME && TURN_CREDENTIAL
+    ? buildTurnServers(TURN_HOST, TURN_USERNAME, TURN_CREDENTIAL)
+    : []
+
+if (TURN_SERVERS.length === 0) {
+  console.warn(
+    '[WebRTC] No TURN servers configured. Cross-network calls may fail. ' +
+      'Set VITE_TURN_HOST / VITE_TURN_USERNAME / VITE_TURN_CREDENTIAL ' +
+      'in .env.local and your hosting platform.'
+  )
+}
+
+const ICE_SERVERS: RTCIceServer[] = [...STUN_SERVERS, ...TURN_SERVERS]
 
 // RTCPeerConnection configuration with ICE candidate pool
 const PC_CONFIG: RTCConfiguration = {
@@ -261,24 +265,30 @@ export function useWebRTC(roomId: Id<"rooms"> | null, userName: string) {
     const pc = new RTCPeerConnection(PC_CONFIG)
 
     // Always create both audio and video transceivers in sendrecv direction so
-    // the offer/answer always contains m=audio and m=video sections, even if
-    // the local stream is missing one (e.g., camera-denied). Attach local tracks
-    // via replaceTrack instead of addTrack so the transceiver order stays fixed
-    // (audio first, video second) on both peers — Unified Plan matches by order.
-    const audioTransceiver = pc.addTransceiver('audio', { direction: 'sendrecv' })
-    const videoTransceiver = pc.addTransceiver('video', { direction: 'sendrecv' })
+    // the offer/answer always contains m=audio and m=video sections in a fixed
+    // order (audio first, video second), even if the local stream is missing
+    // one. CRITICAL: pass the track directly to addTransceiver so it's attached
+    // atomically. Using replaceTrack afterward is async and races with
+    // createOffer/createAnswer, producing SDP without proper SSRC/CNAME and
+    // breaking outbound media -- this was the host-not-visible bug.
+    const stream = localStreamRef.current
+    const audioTrack = stream?.getAudioTracks()[0]
+    const videoTrack = stream?.getVideoTracks()[0]
+    log('Local tracks at PC creation - audio:', !!audioTrack, 'video:', !!videoTrack)
 
-    if (localStreamRef.current) {
-      const audioTrack = localStreamRef.current.getAudioTracks()[0]
-      const videoTrack = localStreamRef.current.getVideoTracks()[0]
-      log('Local tracks - audio:', !!audioTrack, 'video:', !!videoTrack)
-      if (audioTrack) {
-        audioTransceiver.sender.replaceTrack(audioTrack).catch(err => log('replaceTrack audio failed:', err))
-      }
-      if (videoTrack) {
-        videoTransceiver.sender.replaceTrack(videoTrack).catch(err => log('replaceTrack video failed:', err))
-      }
+    if (audioTrack && stream) {
+      pc.addTransceiver(audioTrack, { direction: 'sendrecv', streams: [stream] })
     } else {
+      pc.addTransceiver('audio', { direction: 'sendrecv' })
+    }
+
+    if (videoTrack && stream) {
+      pc.addTransceiver(videoTrack, { direction: 'sendrecv', streams: [stream] })
+    } else {
+      pc.addTransceiver('video', { direction: 'sendrecv' })
+    }
+
+    if (!stream) {
       log('Warning: No local stream available when creating peer connection')
     }
 
