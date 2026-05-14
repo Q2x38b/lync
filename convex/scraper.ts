@@ -1,8 +1,5 @@
 // Server-side scraper for video-call background images.
-//
-// Scrapes Wikimedia Commons' public search endpoint. Wikimedia is built
-// to welcome programmatic access -- no key, no auth, no IP blocking, no
-// proxies. Single HTTP call per query.
+// Scrapes Wikimedia Commons' public search endpoint
 
 import { action } from "./_generated/server";
 import { v } from "convex/values";
@@ -13,10 +10,8 @@ const MAX_IMAGES = 20;
 // per https://meta.wikimedia.org/wiki/User-Agent_policy
 const UA = "lync-scraper/1.0 (school project; contact via github.com/Q2x38b/lync)";
 
-// Only keep actual photo files -- Wikimedia's namespace 6 also returns
+// Only keep actual photo files
 // SVGs, PDFs, audio, video, etc. that we don't want as backgrounds.
-// Matches when the extension is followed by either "?" (URL has a query
-// string) or end-of-string -- Wikimedia thumb URLs append utm_* params.
 const PHOTO_EXT = /\.(jpe?g|png|webp)(\?|$)/i;
 
 export const fetchBackgrounds = action({
